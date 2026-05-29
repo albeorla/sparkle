@@ -848,6 +848,26 @@ def _load_transition_rules(store: GraphStore) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _superseded_by_terminal(store: GraphStore, node_id: str) -> bool:
+    """True when a node in a TERMINAL status supersedes ``node_id``.
+
+    A settled ruling (and a rollback) writes a new terminal node linked
+    ``new --supersedes--> old``. So an inbound ``supersedes`` edge whose source
+    is terminal means this node's thread is already closed/decided — the live
+    state moved on to the terminal version. Used by :func:`rule` to refuse a
+    second settle (no forked ratified siblings) and by the frontier to drop a
+    superseded original off the work feed.
+    """
+    data = store.read()
+    for edge in data["edges"].values():
+        if edge["relation"] != "supersedes" or edge["to_id"] != node_id:
+            continue
+        src = data["nodes"].get(edge["from_id"])
+        if src is not None and src.get("status") in TERMINAL_STATUSES:
+            return True
+    return False
+
+
 def rule(
     store: GraphStore,
     claim_ref: str,
@@ -886,6 +906,13 @@ def rule(
             raise ValueError(
                 "you may not ratify a claim the adversary never attacked; "
                 "run a challenge first (add an objection/contradicts edge)"
+            )
+
+        if settle and _superseded_by_terminal(store, claim_id):
+            raise ValueError(
+                f"claim {claim_id[:12]} is already settled; "
+                "re-settling would fork a second ratified version. "
+                "Re-open it with a fresh claim version (revise) before ruling again"
             )
 
         decision = Node(
@@ -1043,6 +1070,13 @@ def revise(
 
     with graph_lock(store):
         old_id = store.resolve_id(ref)
+        old_status = store.get_node(old_id).get("status")
+        if old_status in TERMINAL_STATUSES:
+            raise ValueError(
+                f"cannot revise a {old_status!r} node ({old_id[:12]}); a terminal "
+                "status is final. Start a fresh claim instead of resurrecting a "
+                "closed one"
+            )
         result = _supersede_node(
             store,
             old_id=old_id,
@@ -1086,6 +1120,7 @@ def _frontier_entries(store: GraphStore) -> list[dict[str, Any]]:
     contradicts: dict[str, int] = {}
     answered: dict[str, int] = {}  # questions that have an inbound answer
     decided: set[str] = set()
+    superseded_closed: set[str] = set()  # superseded by a terminal version
     for edge in data["edges"].values():
         to_id = edge["to_id"]
         rel = edge["relation"]
@@ -1100,6 +1135,15 @@ def _frontier_entries(store: GraphStore) -> list[dict[str, Any]]:
         src = data["nodes"].get(edge["from_id"])
         if rel == "evaluates" and src is not None and src["node_type"] == "decision":
             decided.add(to_id)
+        # A node superseded by a TERMINAL version (a ratified ruling or an
+        # abandoned rollback) is closed — the live thread moved on to the
+        # terminal node, so the frozen original must leave the work feed too.
+        if (
+            rel == "supersedes"
+            and src is not None
+            and src.get("status") in TERMINAL_STATUSES
+        ):
+            superseded_closed.add(to_id)
 
     entries: list[dict[str, Any]] = []
     nodes = sorted(
@@ -1112,8 +1156,15 @@ def _frontier_entries(store: GraphStore) -> list[dict[str, Any]]:
         sup = supports.get(node_id, 0)
         con = contradicts.get(node_id, 0)
 
-        # A judged/closed claim is done — never on the frontier.
-        if node_id in decided or status in ("ratified", "harvested", "abandoned"):
+        # A judged/closed claim is done — never on the frontier. A claim a
+        # terminal version superseded (a rolled-back original, a ratified
+        # original) is closed too, even though the frozen original still reads
+        # 'active'.
+        if (
+            node_id in decided
+            or node_id in superseded_closed
+            or status in ("ratified", "harvested", "abandoned")
+        ):
             continue
 
         bucket: str | None = None

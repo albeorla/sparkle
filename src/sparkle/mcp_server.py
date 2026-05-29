@@ -565,7 +565,16 @@ def build_app() -> FastMCP:
         store = _store()
         rolled: list[dict[str, Any]] = []
         for node in _run_nodes(run_id):
-            if node["status"] == "abandoned":
+            # A node already in a terminal status is done: never re-abandon an
+            # abandoned draft, and never revert a binding settled ruling — the
+            # ratified version inherits the proposer's run_id, so rollback would
+            # otherwise nuke a decision the judge made. Terminal means terminal.
+            if node["status"] in ops.TERMINAL_STATUSES:
+                continue
+            # An original already superseded by an abandoned version is closed;
+            # re-superseding it would fork another abandoned sibling and keep the
+            # rollback from ever converging. Skip it so rollback is idempotent.
+            if ops._superseded_by_terminal(store, node["node_id"]):
                 continue
             new = ops.revise(
                 store,
