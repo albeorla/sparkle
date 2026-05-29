@@ -29,27 +29,38 @@
 - Automated tests for the current CLI workflows
 - Repository docs that anchor the concept, scope, and next steps
 - Demo walkthrough: music-and-coding claim graph with mermaid visualization
+- Shared operations layer (`ops.py`): every graph action is a function returning JSON-able data and raising `ValueError` for user errors; the CLI is a thin formatter over it, so the debate invariants, the referee/transition engine, and the dedup gate live in exactly one place and the front-ends stay interchangeable
+- `ratified` terminal status for a judge's binding ruling, realized model-honestly as a decision node plus a superseding claim version (never an in-place mutation; nodes are frozen)
+- Judge's ruling move with its hard invariant: a claim the adversary never attacked cannot be ratified
+- Ergonomic capture wins: a 12-character handle echoed on its own line after every add, fused create-and-link in one command (`--link-to`/`--relation`, with a paired-or-error guard, new node as the edge source), user-chosen alias names in a sidecar file (`--as`, re-pointed on reuse so names survive supersession), a `relations` legend with direction glosses, spoken-word link confirmations to catch backwards edges, and `list-nodes --ids-only`
+- `revise` command: supersede a node with a corrected version and re-home its inbound edges (or leave them with `--no-rehome-edges`), model-honest editing that never mutates the frozen original
+- JSON `import` on-ramp (file or stdin) that builds a graph fragment two-pass and returns a nickname-to-id map, with optional per-node timestamps for deterministic re-import
+- Content-fingerprint dedup gate over normalized type+title+content (deliberately excluding timestamp/author/confidence) so an identical re-proposal collapses to the existing node instead of forking the graph; near-duplicates are never auto-merged
+- MCP server (`sparkle[mcp]` optional extra, lazy `sparkle mcp` subcommand over stdin/stdout): a thin FastMCP adapter over `ops.py` exposing a work frontier (resource + tool mirror), debate-rule-enforcing mutation tools, run tagging with region review/rollback, and the `/challenge` `/investigate` `/synthesize` `/next` adversarial prompts — the complete interactive intelligent operator, working on Claude Code/Desktop with no server-side model or API key
+- Live, non-persisted frontier and status signals keyed on the inbound supports-minus-contradicts tally plus node type/status, never on the frozen stored confidence
+- Advisory file lock around each read-modify-write for the "one front-end at a time per graph" concurrency contract
 
 ## Next
 
-### Phase 1: Make the CLI actually usable mid-research
+### Phase 2: Autonomous harness (the gated headline)
 
-Right now you have to context-switch out of your research flow to operate the tool. The graph should be something you work *inside*, not something you stop to update.
+Interactive agent operation already works through the MCP server: a model takes turns with you, reading the frontier and committing moves. The remaining leap is **hands-off autonomy** — "Sparkle this claim for five rounds and come back" — where the loop runs unattended without a human turn-taking.
 
-- **`update-node`** — edit status, confidence, content, or tags on an existing node without recreating it. Immutable IDs stay stable; mutable metadata (status, confidence, tags) becomes editable. This is the single biggest friction point.
-- **`merge` / `supersede`** — mark one node as superseding another, carrying forward its edges. Real research converges; right now there's no way to express "this synthesis replaced that one."
-- **`batch` mode** — accept a sequence of commands from stdin or a file. An agent building a graph shouldn't need 20 separate subprocess calls. JSON-lines in, structured results out.
-- **`undo`** — soft-delete the last N operations. Research is messy; you need to be able to back out a wrong turn without surgery on the JSON file.
+This is the one piece that forces the zero-dependency decision. Sampling (the protocol's way for a server to borrow the host's model) is not supported on the mainstream clients today, so autonomy has two honest paths: the server brings its own LLM key behind an optional `sparkle[agents]` extra, or it runs on a sampling-capable client. The shared operations layer already leaves a clearly-marked seam for this: the harness will call those functions directly (not through the CLI or MCP) and inherit every debate guardrail by construction.
 
-### Phase 2: Agent-native interface
+- **`sparkle[agents]` extra + autonomous engine** — walks the same adversarial playbook the interactive loop uses, filling each role's text via a swappable thinking backend, committing through the same `ops` functions and the same referee.
+- **Session governor** — round/write/cost caps plus convergence, oscillation, and deadlock stops; capability-probed at startup, degrading to the interactive loop when no backend is wired.
+- **Role isolation** — invoke the critic in a context that does not contain the evidence pass, so a single model cannot launder self-agreement as a survived challenge. This is the structural prerequisite before autonomy is trusted.
 
-The CLI works for humans in a terminal. Agents need something better. This is where Sparkle becomes a tool that AI agents can use during real research, not just a thing humans poke at.
+**Gated on:** the zero-dependency-vs-key decision must be resolved first. No LLM dependency belongs in the core until then.
 
-- **MCP server** — expose the graph as an MCP tool server. An agent running in Claude Code, Cursor, or any MCP client can `add-node`, `query`, `export` without shelling out. This is the highest-leverage thing on the roadmap.
-- **Structured JSON output** — `--format json` flag on all commands. Agents can't parse ASCII trees. Every command should return machine-readable output when asked.
-- **Query language** — find nodes by combining type, status, confidence range, tag, edge relation, and content search in a single query. "Show me all active objections to nodes tagged 'core-thesis' with confidence > 0.6" should be one command, not a pipeline.
-- **Graph introspection commands** — `gaps` (claims with no evidence), `tensions` (claims with contradicting evidence and no synthesis), `stale` (nodes untouched for N days), `orphans` (disconnected nodes). These tell an agent *what to work on next*.
-- **Session logging** — record every mutation with timestamp and actor (human vs agent name). When an agent builds 30 nodes, you need to know what it did and why, after the fact.
+### Phase 2b: Polish the agent and human surface
+
+- **Structured JSON output** — `--format json` flag on all CLI commands, for machine-readable output without going through MCP.
+- **Query language** — combine type, status, confidence range, tag, edge relation, and content search in a single query.
+- **Standalone introspection commands** — `gaps` (claims with no evidence), `tensions` (claims with contradicting evidence and no synthesis), `stale` (nodes untouched for N days), `orphans` (disconnected nodes). The MCP frontier already covers "what needs adversarial attention next"; these would expose the same kind of signal as first-class CLI commands.
+- **`undo`** — back out the last N operations without superseding node by node.
+- **Session logging** — record every mutation with timestamp and actor (human vs agent name), beyond the per-run metadata stamp the MCP layer already writes.
 
 ### Phase 3: Real citation and source management
 

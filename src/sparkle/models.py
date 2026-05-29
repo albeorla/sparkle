@@ -35,6 +35,7 @@ NodeStatus = Literal[
     "promising",
     "abandoned",
     "harvested",
+    "ratified",
 ]
 
 

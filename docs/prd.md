@@ -73,8 +73,16 @@ Implemented in this repository:
 - crash-safe atomic writes plus defensive handling of corrupt stores, missing required fields, and dangling edges
 - short prefix resolution and short ID display across terminal views
 - terminal-native tree views, provenance chains, and home dashboard, with rendering kept in a dedicated presentation module
-- filtered node listing by type, status, tag, query, and limit
-- local test coverage around the current CLI command set
+- filtered node listing by type, status, tag, query, and limit, plus an ids-only mode for fast scanning before linking
+- a shared operations layer (`ops.py`) that every front-end calls — the CLI is a thin formatter over it, so the debate rules, the referee, and the dedup gate are enforced in exactly one place behind a single error boundary
+- the `ratified` terminal status for a judge's binding ruling, realized model-honestly as a decision node plus a superseding claim version (never an in-place mutation, since nodes are frozen)
+- the judge's ruling move with its hard invariant: a claim the adversary never attacked cannot be ratified
+- ergonomic capture: a 12-character handle echoed after every add, a fused create-and-link in one command, user-chosen alias names stored in a sidecar file (re-pointed on reuse so they survive supersession), a relation legend with direction glosses, and spoken-word link confirmations to catch backwards edges
+- model-honest editing: a `revise` command that supersedes a node with a corrected version and re-homes its inbound edges, never mutating the frozen original
+- a JSON import on-ramp (file or stdin) that builds a graph fragment and returns a nickname-to-id map, with a content-fingerprint dedup gate so an identical re-proposal collapses to the existing node instead of forking the graph
+- an MCP server (`sparkle[mcp]` extra, `sparkle mcp` command) exposing a work frontier, debate-rule-enforcing mutation tools, and adversarial slash-command prompts — so an AI agent in Claude Code or Claude Desktop can operate the graph interactively with the host's own model, no server-side model or API key
+- an advisory file lock around each read-modify-write for the "one front-end at a time per graph" concurrency contract
+- local test coverage around the full CLI command set and the operations layer
 
 ## Out of scope for MVP
 
@@ -87,20 +95,18 @@ Implemented in this repository:
 
 ## Next usability focus
 
-Two priorities before anything else: reduce friction for humans mid-research, and make the tool agent-native.
+Interactive agent operation now works through the MCP server. The next priorities are hands-off autonomy, machine-readable CLI output, and richer introspection — plus the longer-term citation and workflow tracks.
 
-### For humans
+### Autonomy (the gated next step)
 
-- `update-node` for editing mutable metadata (status, confidence, tags) without recreating nodes
-- `merge` / `supersede` for converging syntheses
-- `undo` for backing out wrong turns
+- Autonomous harness so an agent can run unattended ("Sparkle this claim for five rounds and come back") instead of taking turns with a human. This needs the server to get model inference on its own — either its own LLM key behind an optional extra, or a sampling-capable client — which forces the zero-dependency-vs-key decision. The shared operations layer already leaves a marked seam for it; the harness will call those functions directly and inherit every guardrail.
+- Role isolation so the critic does not run in the same context as the evidence pass — the structural fix for the single-context-adversary problem before autonomy is trusted.
 
-### For agents
+### For agents and humans
 
-- MCP server so agents can operate the graph without shelling out
-- `--format json` on all commands for machine-readable output
-- `batch` mode for bulk operations via stdin
-- Graph introspection commands (`gaps`, `tensions`, `stale`, `orphans`) that tell an agent what to work on next
+- `--format json` on all commands for machine-readable output without going through MCP
+- Standalone introspection commands (`gaps`, `tensions`, `stale`, `orphans`) — the MCP frontier covers "what needs attention," but these are not yet first-class CLI commands
+- `undo` for backing out wrong turns without superseding node by node
 - Session logging with actor attribution
 
 ### For real research

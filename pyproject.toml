@@ -11,6 +11,15 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
 
+[project.optional-dependencies]
+# Phase 1a MCP substrate: thin adapter over ops.py exposed via the MCP Python SDK.
+# The zero-dependency core stays clean; this dependency only loads when the extra is installed.
+mcp = ["mcp>=1.12,<2"]
+# Phase 2 seam (autonomous harness) reserved here. Intentionally empty: do NOT add an LLM
+# client until the zero-dependency-vs-key decision is settled. See
+# discussions/sparkle-agent-architecture.md (open decision #1).
+agents = []
+
 [project.scripts]
 sparkle = "sparkle.cli:main"
 
