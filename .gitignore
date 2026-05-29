@@ -4,3 +4,5 @@ __pycache__/
 !demo/.sparkle/
 exports/
 archive/
+build/
+*.egg-info/

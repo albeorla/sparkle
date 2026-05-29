@@ -64,13 +64,15 @@ A solo researcher, builder, or writer exploring an idea with branching lines of 
 
 Implemented in this repository:
 
-- Python CLI for local claim-graph workflows
-- deterministic content-addressed IDs for nodes and edges
+- Python CLI for local claim-graph workflows, runnable via `python -m sparkle` or an installable `sparkle` console command
+- deterministic content-addressed IDs for nodes and edges, with re-adds of identical content treated as no-ops and clashing IDs rejected
 - structured branch templates for common inquiry moves
 - original concept conversation referenced as provenance for the seeded example graph
 - concept bootstrap flow that seeds a starter graph
-- input validation for node type, status, and confidence range
-- terminal-native tree views, provenance chains, and home dashboard
+- input validation for node type, status, confidence range, and edge relation, with confidence and relation checked at argument parse time
+- crash-safe atomic writes plus defensive handling of corrupt stores, missing required fields, and dangling edges
+- short prefix resolution and short ID display across terminal views
+- terminal-native tree views, provenance chains, and home dashboard, with rendering kept in a dedicated presentation module
 - filtered node listing by type, status, tag, query, and limit
 - local test coverage around the current CLI command set
 
@@ -92,7 +94,6 @@ Two priorities before anything else: reduce friction for humans mid-research, an
 - `update-node` for editing mutable metadata (status, confidence, tags) without recreating nodes
 - `merge` / `supersede` for converging syntheses
 - `undo` for backing out wrong turns
-- Short ID display and resolution everywhere
 
 ### For agents
 

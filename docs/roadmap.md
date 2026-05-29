@@ -8,18 +8,24 @@
 - Structured branch templates for support, objection, reframing, and application flows
 - Node status and confidence metadata
 - Input validation for node type, status, and confidence range (0.0-1.0)
-- CLI argument validation via argparse choices
+- CLI argument validation via argparse choices, including confidence range-checked at parse time and edge relations restricted to the known set
+- Empty or whitespace-only node prefixes rejected with a clear error
+- Content collision protection: re-adding identical content is a no-op, but a clashing ID with different content is rejected
+- Crash-safe writes that swap in the new graph file atomically so a failed write cannot corrupt the store
 - Claim-card style node inspection
 - Local ASCII tree rendering
 - Provenance-focused why view
 - Filtered node listing by status, type, tag, query, and limit
 - Home dashboard for graph summary and next actions
 - Lineage inspection
+- Inbound-lineage export for a selected node
 - Markdown export for a selected subgraph
 - Bootstrap flow seeded from the original concept conversation
-- Defensive error handling for corrupt stores and missing node references
-- Optimized single-read traversal for tree and provenance rendering
-- `python -m sparkle` entrypoint
+- Defensive error handling for corrupt stores, missing required fields, and missing node references, with dangling edges skipped during traversal and export
+- Single-read traversal with a shared neighbor-collection helper for tree and provenance rendering
+- Read-only rendering split into its own presentation module, separate from the graph store
+- Short prefix resolution and 12-character ID display across CLI views
+- `python -m sparkle` entrypoint plus an installable `sparkle` console command (`pip install -e .`)
 - Automated tests for the current CLI workflows
 - Repository docs that anchor the concept, scope, and next steps
 - Demo walkthrough: music-and-coding claim graph with mermaid visualization
@@ -33,7 +39,6 @@ Right now you have to context-switch out of your research flow to operate the to
 - **`update-node`** — edit status, confidence, content, or tags on an existing node without recreating it. Immutable IDs stay stable; mutable metadata (status, confidence, tags) becomes editable. This is the single biggest friction point.
 - **`merge` / `supersede`** — mark one node as superseding another, carrying forward its edges. Real research converges; right now there's no way to express "this synthesis replaced that one."
 - **`batch` mode** — accept a sequence of commands from stdin or a file. An agent building a graph shouldn't need 20 separate subprocess calls. JSON-lines in, structured results out.
-- **Short IDs everywhere** — auto-resolve the shortest unambiguous prefix and display short IDs by default. Typing 12-char hashes kills flow.
 - **`undo`** — soft-delete the last N operations. Research is messy; you need to be able to back out a wrong turn without surgery on the JSON file.
 
 ### Phase 2: Agent-native interface

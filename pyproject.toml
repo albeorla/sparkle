@@ -2,8 +2,21 @@
 name = "sparkle"
 version = "0.1.0"
 description = "Claim-graph research MVP with content-addressed provenance"
+readme = "README.md"
 requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{ name = "Albert Orlando" }]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.scripts]
+sparkle = "sparkle.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

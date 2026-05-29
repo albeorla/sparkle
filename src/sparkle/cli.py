@@ -7,13 +7,26 @@ import sys
 
 from typing import get_args
 
+from . import presentation
 from .bootstrap import seed_concept_graph
 from .graph import GraphStore
-from .models import Edge, Node, NodeStatus, NodeType
+from .models import DEFAULT_EDGE_RELATIONS, Edge, Node, NodeStatus, NodeType
 from .templates import BRANCH_TEMPLATES, build_branch_node
 
 VALID_NODE_TYPES = list(get_args(NodeType))
 VALID_NODE_STATUSES = list(get_args(NodeStatus))
+VALID_EDGE_RELATIONS = sorted(DEFAULT_EDGE_RELATIONS)
+
+
+def confidence_arg(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid float value: '{raw}'")
+    if not (0.0 <= value <= 1.0):
+        raise argparse.ArgumentTypeError(f"confidence must be between 0.0 and 1.0, got {value}")
+    return value
+
 
 DEFAULT_STORE = Path(".sparkle/graph.json")
 TYPE_SYMBOLS = {
@@ -51,14 +64,14 @@ def build_parser() -> argparse.ArgumentParser:
     add_node.add_argument("--content", required=True)
     add_node.add_argument("--citations", nargs="*", default=[])
     add_node.add_argument("--author", default="local")
-    add_node.add_argument("--confidence", type=float, default=0.5)
+    add_node.add_argument("--confidence", type=confidence_arg, default=0.5)
     add_node.add_argument("--status", default="active", choices=VALID_NODE_STATUSES)
     add_node.add_argument("--tags", nargs="*", default=[])
 
     add_edge = subparsers.add_parser("add-edge", help="Link two nodes")
     add_edge.add_argument("--from", required=True, dest="from_id")
     add_edge.add_argument("--to", required=True, dest="to_id")
-    add_edge.add_argument("--relation", required=True)
+    add_edge.add_argument("--relation", required=True, choices=VALID_EDGE_RELATIONS)
     add_edge.add_argument("--note", default="")
 
     add_branch = subparsers.add_parser("add-branch", help="Create a structured inquiry branch from an existing node")
@@ -68,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_branch.add_argument("--content")
     add_branch.add_argument("--citations", nargs="*", default=[])
     add_branch.add_argument("--author", default="local")
-    add_branch.add_argument("--confidence", type=float, default=0.5)
+    add_branch.add_argument("--confidence", type=confidence_arg, default=0.5)
     add_branch.add_argument("--tags", nargs="*", default=[])
 
     show = subparsers.add_parser("show", help="Show a node with inbound and outbound edges")
@@ -91,31 +104,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def print_node_summary(node_id: str, node: dict) -> None:
+    c = node["confidence"]
+    conf = f"{c:.2f}" if c is not None else "n/a"
     print(
         f"{node_id[:12]}  {node['node_type']:<10}  {node['status']:<16}  "
-        f"{node['confidence']:.2f}  {node['title']}"
+        f"{conf}  {node['title']}"
     )
-
-
-def node_matches_filters(node: dict, *, filter_type: str | None, status: str | None, tag: str | None, query: str | None) -> bool:
-    if filter_type and node["node_type"] != filter_type:
-        return False
-    if status and node["status"] != status:
-        return False
-    if tag and tag not in node["tags"]:
-        return False
-    if query:
-        haystack = " ".join(
-            [
-                node["title"],
-                node["content"],
-                " ".join(node["tags"]),
-                " ".join(node["citations"]),
-            ]
-        ).lower()
-        if query.lower() not in haystack:
-            return False
-    return True
 
 
 def format_related_node(node_id: str, node: dict) -> str:
@@ -147,12 +141,14 @@ def print_kv_counts(title: str, counts: dict[str, int]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
     store = GraphStore(args.store)
 
     try:
         if args.command == "init":
-            store.init()
             print(f"Initialized graph store at {args.store}")
             return 0
 
@@ -260,17 +256,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "list-nodes":
-            nodes = [
-                (node_id, node)
-                for node_id, node in store.list_nodes()
-                if node_matches_filters(
-                    node,
-                    filter_type=args.filter_type,
-                    status=args.status,
-                    tag=args.tag,
-                    query=args.query,
-                )
-            ]
+            nodes = store.list_nodes(
+                node_type=args.filter_type,
+                status=args.status,
+                tag=args.tag,
+                query=args.query,
+            )
             if args.limit is not None:
                 nodes = nodes[: args.limit]
             if not nodes:
@@ -287,8 +278,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             for edge_id, edge in edges:
                 print(
-                    f"{edge_id[:12]}  {edge['from_id'][:10]} -[{edge['relation']}]-> "
-                    f"{edge['to_id'][:10]}"
+                    f"{edge_id[:12]}  {edge['from_id'][:12]} -[{edge['relation']}]-> "
+                    f"{edge['to_id'][:12]}"
                 )
             return 0
 
@@ -297,7 +288,9 @@ def main(argv: list[str] | None = None) -> int:
             node = store.get_node(node_id)
             neighbors = store.get_neighbor_details(node_id)
 
-            print(f"{node['node_type'].upper()}  {node['status']}  {node['confidence']:.2f}")
+            c = node["confidence"]
+            conf = f"{c:.2f}" if c is not None else "n/a"
+            print(f"{node['node_type'].upper()}  {node['status']}  {conf}")
             print(node["title"])
             print(f"ID: {node_id}")
             if node["tags"]:
@@ -313,12 +306,12 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "tree":
             node_id = store.resolve_id(args.node_id)
-            print(store.render_tree(node_id), end="")
+            print(presentation.render_tree(store, node_id), end="")
             return 0
 
         if args.command == "why":
             node_id = store.resolve_id(args.node_id)
-            print(store.render_why(node_id), end="")
+            print(presentation.render_why(store, node_id), end="")
             return 0
 
         if args.command == "lineage":
@@ -329,15 +322,13 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "export":
             root_id = store.resolve_id(args.root_id)
-            rendered = store.export_markdown(root_id, args.output)
+            rendered = presentation.export_markdown(store, root_id, args.output)
             if args.output:
                 print(f"Exported markdown to {args.output}")
             else:
                 print(rendered)
             return 0
 
-        parser.print_help()
-        return 1
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2

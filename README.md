@@ -37,6 +37,9 @@ See [`docs/roadmap.md`](docs/roadmap.md) for the full plan.
 ```bash
 git clone <repo> && cd sparkle
 
+# Optional: install the `sparkle` console command, then drop the PYTHONPATH prefix
+pip install -e .   # afterwards you can run `sparkle init`, `sparkle home`, etc.
+
 # Initialize a graph store
 PYTHONPATH=src python3 -m sparkle init
 
@@ -66,7 +69,7 @@ PYTHONPATH=src python3 -m sparkle --store demo/.sparkle/graph.json tree e036ff89
 Research is a graph of typed nodes connected by typed edges:
 
 - **Nodes**: `claim`, `evidence`, `question`, `objection`, `inference`, `decision`, `synthesis`
-- **Edges**: `supports`, `contradicts`, `refines`, `derived_from` (or any custom relation)
+- **Edges**: `supports`, `contradicts`, `refines`, `derived_from`, `evaluates`, `produced`, `supersedes` (the CLI validates against this set; the Python kernel accepts custom relation sets)
 - **Status**: `active`, `stalled`, `weakly_supported`, `promising`, `abandoned`, `harvested`
 - **IDs**: SHA256 content hashes — same content always produces the same ID, tamper-evident by construction
 
@@ -99,10 +102,10 @@ All state lives in a single human-readable JSON file (`.sparkle/graph.json`). No
 | `init` | Create an empty graph store |
 | `bootstrap` | Seed with example nodes from the concept conversation |
 | `home` | Dashboard with counts, recent nodes, next actions |
-| `add-node` | Create a node with type, title, content, confidence, status, tags |
-| `add-edge` | Link two nodes with a relation |
+| `add-node` | Create a node with type, title, content, confidence (validated to 0.0-1.0), status, tags |
+| `add-edge` | Link two nodes with a relation (validated against the known relation set) |
 | `add-branch` | Templated node + edge creation for common research moves |
-| `list-nodes` | List nodes with filters (type, status, tag, query, limit) |
+| `list-nodes` | List nodes through a single unified filter (type, status, tag, query, limit) |
 | `list-edges` | List all edges |
 | `list-templates` | Show available branch templates |
 | `show` | Inspect a node with all its incoming and outgoing edges |
@@ -121,13 +124,14 @@ All commands accept `--store <path>` to use a non-default graph file.
 src/sparkle/
   __init__.py       # package marker
   models.py         # Node, Edge — frozen dataclasses with content-addressed IDs
-  graph.py          # GraphStore — JSON-backed storage, traversal, export
+  graph.py          # GraphStore — JSON-backed storage, traversal, lineage export
+  presentation.py   # render_tree, render_why, export_markdown — read-only rendering over a store
   cli.py            # CLI — argparse commands with input validation
   templates.py      # BranchTemplate — opinionated inquiry workflows
   bootstrap.py      # seeds example graph from concept conversation
   __main__.py       # python -m sparkle entrypoint
 tests/
-  test_cli.py       # 16 integration tests via unittest
+  test_cli.py       # 24 integration tests via unittest
 demo/
   README.md         # demo overview with mermaid graph
   WALKTHROUGH.md    # conversational walkthrough of building a claim graph
@@ -155,6 +159,7 @@ classDiagram
       +confidence
       +status
       +tags[]
+      +metadata
       +to_payload()
       +compute_id()
     }
@@ -165,26 +170,33 @@ classDiagram
       +relation
       +note
       +created_at
+      +metadata
       +to_payload()
       +compute_id()
     }
 
     class GraphStore {
       +path
+      +node_types
+      +edge_relations
       +init()
+      +read()
       +add_node(node)
       +add_edge(edge)
       +list_nodes()
       +list_edges()
       +resolve_id(prefix)
       +get_node(node_id)
-      +get_neighbors(node_id)
       +get_neighbor_details(node_id)
       +lineage(root_id)
       +subgraph(root_id)
-      +export_markdown(root_id, output)
-      +render_tree(root_id)
-      +render_why(root_id)
+      +export_lineage(root_id)
+    }
+
+    class presentation {
+      +render_tree(store, root_id)
+      +render_why(store, root_id)
+      +export_markdown(store, root_id, output)
     }
 
     class BranchTemplate {
@@ -200,6 +212,7 @@ classDiagram
     GraphStore --> Node : stores
     GraphStore --> Edge : stores
     BranchTemplate --> Node : configures
+    presentation --> GraphStore : reads
 ```
 </details>
 
@@ -264,7 +277,7 @@ stateDiagram-v2
 python3 -m unittest discover -s tests -v
 ```
 
-16 tests covering: init, bootstrap, node/edge CRUD, branch templates, show/tree/why rendering, filtered listing, home dashboard, lineage, export, error handling (invalid lookups, ambiguous prefixes, out-of-range confidence).
+24 tests covering: init, bootstrap, node/edge CRUD, branch templates, show/tree/why rendering, filtered listing (type/status/tag/query/limit), home dashboard, lineage, markdown export, content-addressing idempotency, custom node-type/relation graph kernels with metadata, lineage-only vs full-component export, `n/a` confidence rendering, dangling-edge export safety, corrupt-store handling, and error handling (invalid lookups, ambiguous prefixes, unknown relations, out-of-range confidence).
 
 ## Current Limits
 

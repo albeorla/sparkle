@@ -21,9 +21,14 @@ Claim-graph research MVP with content-addressed provenance. Pure Python 3.11+, z
 ## Running
 
 ```bash
-python3 -m sparkle <command>          # via __main__.py
-python3 -m src.sparkle.cli <command>  # direct module
+pip install -e .                                  # installs the `sparkle` console command
+sparkle <command>                                 # console entry point (after install)
+
+PYTHONPATH=src python3 -m sparkle <command>       # via __main__.py (no install)
+python3 -m src.sparkle.cli <command>              # direct module
 ```
+
+Note: `python3 -m sparkle` needs `PYTHONPATH=src` because the package lives under `src/`.
 
 ## Testing
 

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import json
 from pathlib import Path
 import tempfile
 import unittest
 
+from src.sparkle import presentation
 from src.sparkle.cli import main
 from src.sparkle.graph import GraphStore
 from src.sparkle.models import Edge, Node
@@ -341,7 +343,7 @@ class SparkleCliTestCase(unittest.TestCase):
         self.assertIn("<- contradicts", output)
         self.assertEqual(err, "")
 
-    def test_ambiguous_prefix_returns_nonzero_and_stderr(self) -> None:
+    def test_empty_prefix_returns_nonzero_and_stderr(self) -> None:
         self.run_cli("init")
         self.run_cli(
             "add-node",
@@ -365,7 +367,7 @@ class SparkleCliTestCase(unittest.TestCase):
         exit_code, output, err = self.run_cli("show", "")
         self.assertEqual(exit_code, 2)
         self.assertEqual(output, "")
-        self.assertIn("Ambiguous prefix", err)
+        self.assertIn("node prefix cannot be empty", err)
 
     def test_add_edge_rejects_unknown_node_reference(self) -> None:
         self.run_cli("init")
@@ -529,8 +531,8 @@ class SparkleCliTestCase(unittest.TestCase):
         self.assertEqual(store.get_node(claim_id[:12])["metadata"]["pack"], "finance")
         self.assertEqual(store.list_nodes(node_type="metric", tag="finance", query="positive")[0][0], metric_id)
         self.assertEqual(store.list_edges()[0][0], edge_id)
-        self.assertIn(metric_id, store.export(claim_id[:12])["nodes"])
-        self.assertIn("<- quantifies", store.render_why(claim_id[:12]))
+        self.assertIn(metric_id, store.export_lineage(claim_id[:12])["nodes"])
+        self.assertIn("<- quantifies", presentation.render_why(store, claim_id[:12]))
 
     def test_graph_kernel_rejects_unknown_custom_type_or_relation(self) -> None:
         store = GraphStore(self.store, node_types={"claim"}, edge_relations={"supports"})
@@ -541,6 +543,143 @@ class SparkleCliTestCase(unittest.TestCase):
             store.add_node(Node(node_type="metric", title="Metric", content="Content"))
         with self.assertRaisesRegex(ValueError, "unknown edge relation"):
             store.add_edge(Edge(from_id=other_id, to_id=claim_id, relation="quantifies"))
+
+    def test_none_confidence_renders_na_across_read_commands(self) -> None:
+        store = GraphStore(self.store)
+        node_id = store.add_node(
+            Node(
+                node_type="claim",
+                title="No confidence claim",
+                content="A claim with unknown confidence.",
+                confidence=None,
+            )
+        )
+
+        for command in ("list-nodes",):
+            exit_code, output, err = self.run_cli(command)
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(err, "")
+            self.assertIn("n/a", output)
+
+        for command in ("show", "lineage"):
+            exit_code, output, err = self.run_cli(command, node_id[:12])
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(err, "")
+            self.assertIn("n/a", output)
+
+    def test_export_skips_dangling_edge_endpoint(self) -> None:
+        store = GraphStore(self.store)
+        root_id = store.add_node(
+            Node(node_type="claim", title="Root claim", content="Root content")
+        )
+        evidence_id = store.add_node(
+            Node(node_type="evidence", title="Real evidence", content="Evidence content")
+        )
+        store.add_edge(Edge(from_id=evidence_id, to_id=root_id, relation="supports"))
+
+        # Inject a dangling edge pointing at a node id that does not exist.
+        missing_id = "0" * 64
+        data = json.loads(self.store.read_text(encoding="utf-8"))
+        dangling_edge = {
+            "from_id": missing_id,
+            "to_id": root_id,
+            "relation": "supports",
+            "note": "",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "metadata": {},
+        }
+        data["edges"]["dangling-edge-id"] = dangling_edge
+        self.store.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+        exit_code, output, err = self.run_cli("export", "--root", root_id[:12])
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(err, "")
+        self.assertIn("# Root claim", output)
+        self.assertIn("Real evidence", output)
+        # The dangling endpoint id must not show up as a rendered node body.
+        self.assertNotIn(missing_id, output)
+
+    def test_invalid_store_missing_required_field_exits_two(self) -> None:
+        store = GraphStore(self.store)
+        node_id = store.add_node(
+            Node(node_type="claim", title="Claim title", content="Claim content")
+        )
+
+        # Corrupt the store by removing a required node field.
+        data = json.loads(self.store.read_text(encoding="utf-8"))
+        del data["nodes"][node_id]["title"]
+        self.store.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+        exit_code, output, err = self.run_cli("list-nodes")
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output, "")
+        self.assertIn("Invalid graph store", err)
+
+    def test_lineage_and_full_component_export_differ(self) -> None:
+        store = GraphStore(self.store)
+        root_id = store.add_node(
+            Node(node_type="claim", title="Root claim", content="Root content")
+        )
+        supporter_id = store.add_node(
+            Node(node_type="evidence", title="Supporting evidence", content="Supports the root")
+        )
+        downstream_id = store.add_node(
+            Node(node_type="synthesis", title="Downstream synthesis", content="Built from the root")
+        )
+
+        # Supporter -> root (inbound to root); root -> downstream (outbound from root).
+        store.add_edge(Edge(from_id=supporter_id, to_id=root_id, relation="supports"))
+        store.add_edge(Edge(from_id=root_id, to_id=downstream_id, relation="derived_from"))
+
+        lineage_nodes = store.export_lineage(root_id)["nodes"]
+        self.assertIn(supporter_id, lineage_nodes)
+        self.assertNotIn(downstream_id, lineage_nodes)
+
+        rendered = presentation.export_markdown(store, root_id)
+        self.assertIn("Supporting evidence", rendered)
+        self.assertIn("Downstream synthesis", rendered)
+
+    def test_list_nodes_limit_emits_expected_single_node(self) -> None:
+        self.run_cli("init")
+        self.run_cli(
+            "add-node",
+            "--type",
+            "claim",
+            "--title",
+            "Only limited claim",
+            "--content",
+            "Single emitted node content.",
+        )
+
+        exit_code, output, err = self.run_cli("list-nodes", "--limit", "1")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(err, "")
+        emitted = [line for line in output.splitlines() if line.strip()]
+        self.assertEqual(len(emitted), 1)
+        self.assertIn("Only limited claim", emitted[0])
+
+    def test_content_addressing_is_idempotent(self) -> None:
+        store = GraphStore(self.store)
+        node = Node(
+            node_type="claim",
+            title="Idempotent claim",
+            content="Same content addressed twice.",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+
+        first_id = store.add_node(node)
+        second_id = store.add_node(node)
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(len(store.list_nodes()), 1)
+
+        different = Node(
+            node_type="claim",
+            title="Different claim",
+            content="Different content yields a different id.",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        different_id = store.add_node(different)
+        self.assertNotEqual(first_id, different_id)
 
 
 if __name__ == "__main__":
