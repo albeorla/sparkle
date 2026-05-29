@@ -81,8 +81,11 @@ Implemented in this repository:
 - model-honest editing: a `revise` command that supersedes a node with a corrected version and re-homes its inbound edges, never mutating the frozen original
 - a JSON import on-ramp (file or stdin) that builds a graph fragment and returns a nickname-to-id map, with a content-fingerprint dedup gate so an identical re-proposal collapses to the existing node instead of forking the graph
 - an MCP server (`sparkle[mcp]` extra, `sparkle mcp` command) exposing a work frontier, debate-rule-enforcing mutation tools, and adversarial slash-command prompts — so an AI agent in Claude Code or Claude Desktop can operate the graph interactively with the host's own model, no server-side model or API key
+- an autonomous adversarial harness (`sparkle[agents]` extra, `sparkle run` command) that drives the propose -> critique -> gather -> judge -> synthesize playbook with no human in the turn order: a proposer, a different-model critic, and a judge debate a seed question unattended, with every mutation routed through `ops.py` so the loop inherits all the debate invariants
+- a distinct-adversary integrity floor in the shared operations layer: the judge's ratification gate can require that an objection came from a different author than the claim's own author (a self-written objection can no longer ratify a claim), and a self-loop `contradicts` edge is banned at the edge-write boundary — both inherited by every front-end, turned on by the harness
+- per-role model isolation: the proposer, critic, and judge are separate model calls with separate contexts and distinct author identities, with a locked, config-enforced invariant that the critic model differs from the proposer model so the adversary is a genuinely different model rather than the proposer rephrasing itself
 - an advisory file lock around each read-modify-write for the "one front-end at a time per graph" concurrency contract
-- local test coverage around the full CLI command set and the operations layer
+- local test coverage around the full CLI command set, the operations layer, and the autonomous engine (the engine is proven with a deterministic stub thinker — no network, no key; the live three-model debate is a manual acceptance step)
 
 ## Out of scope for MVP
 
@@ -95,12 +98,7 @@ Implemented in this repository:
 
 ## Next usability focus
 
-Interactive agent operation now works through the MCP server. The next priorities are hands-off autonomy, machine-readable CLI output, and richer introspection — plus the longer-term citation and workflow tracks.
-
-### Autonomy (the gated next step)
-
-- Autonomous harness so an agent can run unattended ("Sparkle this claim for five rounds and come back") instead of taking turns with a human. This needs the server to get model inference on its own — either its own LLM key behind an optional extra, or a sampling-capable client — which forces the zero-dependency-vs-key decision. The shared operations layer already leaves a marked seam for it; the harness will call those functions directly and inherit every guardrail.
-- Role isolation so the critic does not run in the same context as the evidence pass — the structural fix for the single-context-adversary problem before autonomy is trusted.
+Both interactive agent operation (the MCP server) and hands-off autonomy (the `sparkle run` harness) now work. The autonomy decision is settled: the model backend lives behind the optional `sparkle[agents]` extra and is imported lazily, so the core stays zero-dependency. The next priorities are machine-readable CLI output and richer introspection, plus the longer-term citation and workflow tracks.
 
 ### For agents and humans
 

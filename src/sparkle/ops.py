@@ -42,6 +42,7 @@ Pure stdlib. No argparse, no MCP, no model/LLM dependency anywhere in this file.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -418,6 +419,10 @@ def _add_edge_locked(
     """
     from_id = store.resolve_id(from_ref) if resolve_from else from_ref
     to_id = store.resolve_id(to_ref)
+    if relation == "contradicts" and from_id == to_id:
+        raise ValueError(
+            "a contradicts edge cannot point at itself; a claim cannot be its own objection"
+        )
     edge = Edge(
         from_id=from_id,
         to_id=to_id,
@@ -475,15 +480,26 @@ def add_branch(
     confidence: float = 0.5,
     tags: list[str] | None = None,
     model_authored: bool = False,
+    run_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a structured inquiry branch (one of the four debate moves).
 
     Wraps :func:`~sparkle.templates.build_branch_node` plus the two store writes
     (node, then the templated edge child --> parent), matching the existing CLI
     convention. Returns both the branch node view and the link view.
+
+    When ``run_id`` is given (the autonomous loop path), it is stamped onto both
+    the branch node's metadata and the templated edge's metadata so the
+    objection lands in the run region and is visible to ``run_summary`` /
+    ``run_diff`` / ``rollback_run``. Default ``None`` leaves both metadata blobs
+    untouched so every existing human-CLI caller is byte-identical.
     """
     if model_authored:
         confidence = cap_confidence(confidence) or 0.0
+    node_meta = dict(metadata or {})
+    if run_id is not None:
+        node_meta["run_id"] = run_id
     with graph_lock(store):
         parent_id = store.resolve_id(from_ref)
         parent = store.get_node(parent_id)
@@ -497,6 +513,10 @@ def add_branch(
             confidence=confidence,
             extra_tags=list(tags or []),
         )
+        # The branch Node is frozen; ``replace`` rebuilds it with the run stamp.
+        # Only metadata changes, so __post_init__'s confidence check still holds,
+        # and the id is computed lazily at ``add_node`` time, not here.
+        branch_node = replace(branch_node, metadata=node_meta)
         branch_id = store.add_node(branch_node)
         link = _add_edge_locked(
             store,
@@ -504,6 +524,7 @@ def add_branch(
             to_ref=parent_id,
             relation=tmpl.relation,
             note=tmpl.edge_note,
+            metadata=node_meta,
             resolve_from=False,
         )
         node = store.get_node(branch_id)
@@ -868,6 +889,30 @@ def _superseded_by_terminal(store: GraphStore, node_id: str) -> bool:
     return False
 
 
+def _distinct_adversary_objection(
+    store: GraphStore, claim_id: str, claim_author: str
+) -> bool:
+    """True when at least one inbound ``contradicts`` objection has a DIFFERENT author.
+
+    The "was this claim challenged?" gate in :func:`edge_tally` only counts that
+    an objection exists — it is deliberately author-blind. This helper is the
+    stronger check the autonomous loop turns on: an objection only counts as a
+    real attack when its SOURCE node's author differs from the claim's author, so
+    a single model cannot ratify its own claim off a self-written strawman. A
+    missing author defaults to ``"local"`` (matching the Node default), so a
+    human-authored objection against a model claim is correctly treated as
+    distinct.
+    """
+    data = store.read()
+    for edge in data["edges"].values():
+        if edge["relation"] != "contradicts" or edge["to_id"] != claim_id:
+            continue
+        src = data["nodes"].get(edge["from_id"])
+        if src is not None and src.get("author", "local") != claim_author:
+            return True
+    return False
+
+
 def rule(
     store: GraphStore,
     claim_ref: str,
@@ -877,6 +922,8 @@ def rule(
     settle: bool = False,
     author: str = "local",
     confidence: float | None = 0.8,
+    run_id: str | None = None,
+    require_distinct_adversary: bool = False,
 ) -> dict[str, Any]:
     """Record a judge's ruling on a claim — the one move with a hard invariant.
 
@@ -886,6 +933,18 @@ def rule(
     single most important guardrail and it lives here so the CLI, the MCP
     server, and any future harness all inherit it through the same boundary.
 
+    ``require_distinct_adversary`` (default ``False``) hardens that gate for the
+    autonomous loop: when ``True``, a claim only counts as "challenged" if at
+    least one inbound ``contradicts`` objection comes from a DIFFERENT author
+    than the claim itself, so a single model cannot ratify its own claim off a
+    self-written strawman. The human CLI path leaves this ``False`` (a human is
+    trusted), so existing behavior is unchanged.
+
+    ``run_id`` (default ``None``) stamps the decision node, the evaluates edges,
+    and — when settled — the ratified claim and its supersedes edge so the whole
+    ruling lands in the run region. Default ``None`` leaves every stamp empty so
+    existing callers are byte-identical.
+
     On a legal ruling it writes a ``decision`` node and links it to the claim
     with an ``evaluates`` edge (judge convention). When ``settle=True`` it also
     writes a SUPERSEDING claim version carrying ``status="ratified"`` (never an
@@ -893,6 +952,7 @@ def rule(
 
     Returns the decision view and, when settled, the superseding claim view.
     """
+    run_meta = {"run_id": run_id} if run_id is not None else {}
     with graph_lock(store):
         claim_id = store.resolve_id(claim_ref)
         claim = store.get_node(claim_id)
@@ -907,6 +967,16 @@ def rule(
                 "you may not ratify a claim the adversary never attacked; "
                 "run a challenge first (add an objection/contradicts edge)"
             )
+
+        if require_distinct_adversary:
+            claim_author = claim.get("author", "local")
+            if not _distinct_adversary_objection(store, claim_id, claim_author):
+                raise ValueError(
+                    f"claim {claim_id[:12]} was only objected to by its own author "
+                    f"({claim_author!r}); a self-written objection cannot ratify it. "
+                    "A different author (a distinct critic) must record the contradicts "
+                    "objection before this claim can be ruled"
+                )
 
         if settle and _superseded_by_terminal(store, claim_id):
             raise ValueError(
@@ -923,7 +993,7 @@ def rule(
             confidence=confidence,
             status="active",
             tags=["ruling"],
-            metadata={"verdict": verdict, "claim_id": claim_id},
+            metadata={"verdict": verdict, "claim_id": claim_id, **run_meta},
         )
         decision_id = store.add_node(decision)
         decision_link = _add_edge_locked(
@@ -932,6 +1002,7 @@ def rule(
             to_ref=claim_id,
             relation="evaluates",
             note="judge ruling",
+            metadata=dict(run_meta),
             resolve_from=False,
         )
 
@@ -947,10 +1018,15 @@ def rule(
                 old_id=claim_id,
                 changes={
                     "status": "ratified",
-                    "metadata": {**claim.get("metadata", {}), "ratified_by": decision_id},
+                    "metadata": {
+                        **claim.get("metadata", {}),
+                        "ratified_by": decision_id,
+                        **run_meta,
+                    },
                 },
                 rehome_inbound=False,
                 note="ratified ruling",
+                metadata=run_meta,
             )
             # Point the decision at the ratified version too, so the frontier's
             # "judged" check sees a decision on the live (ratified) node.
@@ -960,6 +1036,7 @@ def rule(
                 to_ref=ratified["node_id"],
                 relation="evaluates",
                 note="judge ruling (ratified version)",
+                metadata=dict(run_meta),
                 resolve_from=False,
             )
             result["ratified_claim"] = _node_view(
@@ -975,6 +1052,7 @@ def _supersede_node(
     changes: dict[str, Any],
     rehome_inbound: bool,
     note: str = "",
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write a corrected copy of a node and link new --supersedes--> old.
 
@@ -982,7 +1060,9 @@ def _supersede_node(
     applied on top of the old node's fields to build the new immutable node.
     When ``rehome_inbound`` is True, every inbound edge of the old node is
     re-created pointing at the new node (its outbound edges already follow via
-    lineage through the supersedes link). Must run inside :func:`graph_lock`.
+    lineage through the supersedes link). ``metadata`` (default ``None``) stamps
+    the supersedes edge so the run loop can see the lineage; callers without a
+    run (revise, mcp_server) leave it empty. Must run inside :func:`graph_lock`.
 
     Returns ``{"node_id", "supersedes_edge", "rehomed": [...]}``.
     """
@@ -1011,6 +1091,7 @@ def _supersede_node(
         to_ref=old_id,
         relation="supersedes",
         note=note,
+        metadata=dict(metadata or {}),
         resolve_from=False,
     )
     rehomed: list[dict[str, Any]] = []

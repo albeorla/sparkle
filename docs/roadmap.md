@@ -40,19 +40,17 @@
 - Live, non-persisted frontier and status signals keyed on the inbound supports-minus-contradicts tally plus node type/status, never on the frozen stored confidence
 - Advisory file lock around each read-modify-write for the "one front-end at a time per graph" concurrency contract
 
+### Phase 2: Autonomous adversarial harness
+
+The zero-dependency-vs-key question is settled: sampling (the protocol's way for a server to borrow the host's model) is not available on the mainstream clients, so the harness brings the model in behind an optional extra. The Anthropic SDK lives only inside `thinker.py`, imported lazily, so the stdlib core, the CLI core, and the MCP server all stay dependency-free.
+
+- Autonomous engine (`sparkle[agents]` extra, lazy `sparkle run <seed>` subcommand): walks the same propose -> critique -> gather -> judge -> synthesize playbook the interactive loop uses, with no human in the turn order. The model backend is injected as a duck-typed "thinker", so the engine is pure with respect to the model and never imports `anthropic` itself; every graph mutation is routed through the same `ops` functions and the same referee, stamped with a `run_id` so the whole run is visible to the run-summary/diff/rollback surface
+- Per-role model isolation: the proposer, critic, and judge are separate model calls with separate contexts and distinct author identities. The critic runs on a different Claude model than the proposer by default (proposer/judge = `claude-opus-4-8`, critic = `claude-sonnet-4-6`); the per-role models are env-overridable (`SPARKLE_PROPOSER_MODEL`/`SPARKLE_CRITIC_MODEL`/`SPARKLE_JUDGE_MODEL`) with one locked, config-enforced invariant — the critic model must differ from the proposer model — so the adversary is a genuinely different model, not the proposer rephrasing itself
+- Distinct-adversary integrity floor in the shared operations layer: the judge's ratification gate (`require_distinct_adversary`, off for the human CLI, on for the harness) only counts an objection if its author differs from the claim's own author, so a self-written objection can no longer ratify a claim; the engine additionally requires the objecting author to map to a different model than the claim's. A self-loop `contradicts` edge (a claim objecting to itself) is banned at the edge-write boundary
+- Stop conditions: per-phase round caps from the playbook, a hard total-move backstop for a runaway thinker, an explicit `done`/`stop` move from any role, a frontier-empty stop, the natural "judge ruled" terminal, and an optional thinker-call / token-budget cost ceiling
+- Engine test coverage with a deterministic stub thinker (no network, no key, runs in the base suite): the full propose -> object -> rule loop, the distinct-adversary refusal vs success, the self-loop ban, run-id plumbing through `add-branch` and `rule`, the hard move cap, the `done` move, and the critic-vs-proposer config invariant. The live three-model debate (real `ANTHROPIC_API_KEY`) is a manual human acceptance step, not validated by the test suite
+
 ## Next
-
-### Phase 2: Autonomous harness (the gated headline)
-
-Interactive agent operation already works through the MCP server: a model takes turns with you, reading the frontier and committing moves. The remaining leap is **hands-off autonomy** — "Sparkle this claim for five rounds and come back" — where the loop runs unattended without a human turn-taking.
-
-This is the one piece that forces the zero-dependency decision. Sampling (the protocol's way for a server to borrow the host's model) is not supported on the mainstream clients today, so autonomy has two honest paths: the server brings its own LLM key behind an optional `sparkle[agents]` extra, or it runs on a sampling-capable client. The shared operations layer already leaves a clearly-marked seam for this: the harness will call those functions directly (not through the CLI or MCP) and inherit every debate guardrail by construction.
-
-- **`sparkle[agents]` extra + autonomous engine** — walks the same adversarial playbook the interactive loop uses, filling each role's text via a swappable thinking backend, committing through the same `ops` functions and the same referee.
-- **Session governor** — round/write/cost caps plus convergence, oscillation, and deadlock stops; capability-probed at startup, degrading to the interactive loop when no backend is wired.
-- **Role isolation** — invoke the critic in a context that does not contain the evidence pass, so a single model cannot launder self-agreement as a survived challenge. This is the structural prerequisite before autonomy is trusted.
-
-**Gated on:** the zero-dependency-vs-key decision must be resolved first. No LLM dependency belongs in the core until then.
 
 ### Phase 2b: Polish the agent and human surface
 

@@ -152,6 +152,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mcp_cmd.set_defaults(_mcp=True)
 
+    run_cmd = subparsers.add_parser(
+        "run",
+        help="Run the autonomous adversarial loop (requires the 'sparkle[agents]' extra)",
+    )
+    run_cmd.add_argument("seed", help="the seed question or claim to debate")
+    run_cmd.add_argument(
+        "--rounds",
+        type=int,
+        default=None,
+        help="override max critique/gather rounds",
+    )
+    run_cmd.add_argument("--run-id", dest="run_id", default=None)
+    run_cmd.add_argument(
+        "--max-moves",
+        type=int,
+        default=None,
+        help="hard iteration cap (runaway backstop)",
+    )
+    run_cmd.set_defaults(_run=True)
+
     show = subparsers.add_parser("show", help="Show a node with inbound and outbound edges")
     show.add_argument("node_id")
 
@@ -257,6 +277,44 @@ def main(argv: list[str] | None = None) -> int:
             print("pip install 'sparkle[mcp]'", file=sys.stderr)
             return 2
         run_server(args.store)
+        return 0
+
+    # The autonomous-run subcommand is a lazy seam exactly like the MCP one:
+    # importing the harness (and, inside run_cli_loop, the real model thinker)
+    # is deferred until asked, so every other command works without the
+    # 'sparkle[agents]' extra. The harness module top-level is stdlib-only; the
+    # only thing that can raise ImportError here is a missing 'anthropic',
+    # imported lazily when run_cli_loop constructs the real per-role thinkers —
+    # so the catch wraps both the import and the call.
+    if getattr(args, "_run", False):
+        from .graph import GraphStore
+
+        try:
+            from .harness import run_cli_loop
+
+            result = run_cli_loop(
+                store=GraphStore(args.store),
+                seed=args.seed,
+                run_id=args.run_id,
+                rounds=args.rounds,
+                max_moves=args.max_moves,
+            )
+        except ImportError:
+            print("pip install 'sparkle[agents]'", file=sys.stderr)
+            return 2
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+
+        print(f"Run: {result['run_id']}")
+        if result.get("claim_id"):
+            print(f"Handle: {result['claim_id'][:12]}")
+        print(f"Status: {result.get('status', 'done')}")
+        print(f"Rounds: {result.get('rounds_run', 0)}")
+        print(f"Moves: {len(result.get('moves', []))}")
+        signal = result.get("final_signal")
+        if signal is not None:
+            print(f"Final signal: {signal}")
         return 0
 
     from .graph import GraphStore
