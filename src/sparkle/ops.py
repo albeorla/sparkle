@@ -332,6 +332,7 @@ def add_node(
     relation: str | None = None,
     model_authored: bool = False,
     settled: bool = False,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """Add a typed node; optionally fuse a link to an existing node in one call.
 
@@ -344,6 +345,21 @@ def add_node(
     and the terminal-status guard. The new node is the *source* of the optional
     link (``from_id=new node``); the caller chooses the relation, so the fused
     link never guesses direction.
+
+    ``run_id`` (default ``None``) stamps the new NODE metadata AND the fused link
+    edge so an autonomous loop's proposal/synthesis (node + its ``produced``
+    edge) lands in the run region and is captured by ``run_summary`` /
+    ``run_diff`` / rollback — mirroring how :func:`add_branch` and :func:`rule`
+    stamp both the node and its edges. Default ``None`` leaves both the node and
+    the link blobs untouched, so existing CLI callers stay byte-identical.
+
+    RESIDUAL GAP (accepted, do not paper over): when ``run_id`` is set but the
+    proposal is a dedup hit (an exact-fingerprint re-proposal of the SAME seed),
+    the EXISTING node is returned and keeps its FIRST run's ``run_id``. A second
+    run that re-proposes an identical claim therefore stays attributed to run #1.
+    Nodes are frozen by contract (see module docstring), so we deliberately do
+    NOT mutate the existing node to re-stamp it — re-attributing a deduped node
+    would require a frozen-node mutation, which the model forbids.
     """
     if (link_to is None) != (relation is None):
         raise ValueError(
@@ -357,6 +373,11 @@ def add_node(
     citations = list(citations or [])
     tags = list(tags or [])
     metadata = dict(metadata or {})
+    # CHANGE C: stamp the run id onto the node metadata (only when present, so
+    # the byte-identical default holds for un-run human writes). An explicit
+    # metadata["run_id"] from the caller wins if both are passed.
+    if run_id is not None:
+        metadata.setdefault("run_id", run_id)
 
     with graph_lock(store):
         dup = find_duplicate(
@@ -389,11 +410,16 @@ def add_node(
         }
 
         if link_to is not None and relation is not None:
+            # CHANGE C: forward the run id to the FUSED LINK edge (e.g. the
+            # synthesis 'produced' edge) so it lands in the run region too. Only
+            # attached when run_id is set, keeping the default byte-identical.
+            link_meta = {"run_id": run_id} if run_id is not None else None
             link = _add_edge_locked(
                 store,
                 from_ref=node_id,
                 to_ref=link_to,
                 relation=relation,
+                metadata=link_meta,
                 resolve_from=False,
             )
             result["link"] = link
@@ -902,10 +928,18 @@ def _distinct_adversary_objection(
     missing author defaults to ``"local"`` (matching the Node default), so a
     human-authored objection against a model claim is correctly treated as
     distinct.
+
+    CHANGE A: a ``contradicts`` edge that was REHOMED onto a rewritten claim (its
+    metadata carries ``rehomed=True``) does NOT count as a fresh adversary. After
+    a revise rehomes a prior objection onto the new claim version, the rewritten
+    claim must earn a brand-new objection before it can be ratified — the stale
+    copied-over attack is for lineage/display only.
     """
     data = store.read()
     for edge in data["edges"].values():
         if edge["relation"] != "contradicts" or edge["to_id"] != claim_id:
+            continue
+        if edge.get("metadata", {}).get("rehomed"):
             continue
         src = data["nodes"].get(edge["from_id"])
         if src is not None and src.get("author", "local") != claim_author:
@@ -1100,6 +1134,12 @@ def _supersede_node(
         for item in details["inbound"]:
             if item["node_id"] == new_id:
                 continue  # don't rehome the supersedes edge onto itself
+            # CHANGE A: stamp rehomed=True so the adversary gates (the seam's
+            # author-distinct floor and the harness cross-family gate) can SKIP a
+            # copied-over objection. Rehoming still happens for lineage/display;
+            # we only TAG it. A rewritten claim must therefore earn a FRESH
+            # cross-author/cross-family objection before it can be ratified.
+            rehome_meta = {**(metadata or {}), "rehomed": True}
             rehomed.append(
                 _add_edge_locked(
                     store,
@@ -1107,6 +1147,7 @@ def _supersede_node(
                     to_ref=new_id,
                     relation=item["relation"],
                     note=item.get("note", ""),
+                    metadata=rehome_meta,
                     resolve_from=False,
                 )
             )

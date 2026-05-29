@@ -1,160 +1,152 @@
-"""Sparkle thinkers — the ONLY module that talks to the Anthropic model backend.
+"""Sparkle thinkers — the ONLY module that shells out to a model CLI backend.
 
 This is the live-path edge of the Phase 2 autonomous harness. The autonomous
 engine (:mod:`sparkle.harness`) is pure with respect to the model: it drives the
 debate by calling a *thinker* — any object with a single ``think(...)`` method
 (the ``Thinker`` protocol declared in ``harness.py``). This module supplies the
-real thinker that wraps the official Anthropic Python SDK; a deterministic stub
-thinker lives in the test suite for network-free, key-free runs.
+real thinkers, which shell out to local command-line tools, plus a deterministic
+stub thinker for network-free, key-free runs.
 
-Hard dependency boundary (this is the whole point of the module):
+Why CLIs instead of an SDK / API key:
+
+- ``claude -p`` rides Albert's Claude Max login; ``codex exec`` rides the
+  Codex/ChatGPT login. Both bill against the existing subscription, not a
+  per-token Console API key. So there is NO ``anthropic`` / ``openai`` pip
+  package here and NO ``ANTHROPIC_API_KEY``: the real thinkers run the
+  already-installed ``claude`` / ``codex`` binaries via :mod:`subprocess`.
+- Real adversarial diversity comes from DIFFERENT MODEL FAMILIES (Claude vs
+  GPT), not different Claude tiers, so every Claude-side role runs Opus 4.8 and
+  the critic runs GPT-5.5 through the codex CLI.
+
+Hard dependency boundary (the whole point of the module):
 
 - ``import sparkle.thinker`` MUST succeed with ZERO third-party packages
-  installed. Nothing at module top imports ``anthropic``.
-- ``anthropic`` is imported **lazily**, inside :meth:`AnthropicThinker.__init__`
-  (and only there). Constructing or using the real thinker is what needs the
-  ``sparkle[agents]`` extra and a key — merely importing this module does not.
-- This is the *only* file in the package that ever names ``anthropic``. The
-  engine, the seam (``ops.py``), the CLI core, and the MCP server stay
-  zero-dependency.
+  installed. Everything imported at module top is stdlib (subprocess, json,
+  shutil, tempfile, os).
+- This module names no SDK. The engine, the seam (``ops.py``), the CLI core, and
+  the MCP server stay zero-dependency.
 
-What the real thinker does:
-
-- Reads the key from the ``ANTHROPIC_API_KEY`` environment variable (the SDK's
-  own default, made explicit here so a missing key fails with a clear message
-  before any network call is attempted).
-- Calls the Messages API (``client.messages.create``) with a system prompt, a
-  single user turn, and a model id, and returns the concatenated text of the
-  response's text blocks as a plain string.
-
-What the per-role factory does:
-
-- Builds one real thinker per debate role (proposer / critic / judge, plus
-  evidence-gatherer and synthesizer) from the per-role model ids in the
-  environment, enforcing the locked invariant that the **critic model differs
-  from the proposer model** so the adversary is a genuinely different model and
-  not the proposer rephrasing itself.
-- Raises a single, actionable :class:`ImportError` if the SDK is missing and a
-  :class:`RuntimeError` if the key is missing, so the CLI ``run`` command can
-  print the ``pip install 'sparkle[agents]'`` hint (or the key hint) instead of
-  surfacing a raw stack trace.
-
-No live API call is made at import time, at construction time, or by the factory
-— a call only happens when something invokes :meth:`AnthropicThinker.think`.
+The test seam: each real thinker takes an INJECTABLE ``runner`` (a callable
+wrapping :func:`subprocess.run`) defaulting to the real one, so tests can drive
+argv construction and output parsing WITHOUT spawning a real CLI process. No
+live CLI call is made at import time, at construction time, or by the factory —
+a call only happens when something invokes ``think`` with the default runner.
 """
 
 from __future__ import annotations
 
+import json
 import os
-from typing import Any
+import shutil
+import subprocess
+import tempfile
+from typing import Any, Callable
 
-# Locked default per-role models (see the Phase 2 spec). The invariant the
-# config must preserve is critic_model != proposer_model: the critic must run on
-# a different Claude model so its attack is not the proposer's own reasoning
-# rephrased. evidence_gatherer defaults to the critic model and synthesizer to
-# the judge model; both are env-overridable but only critic != proposer is
-# locked.
-DEFAULT_PROPOSER_MODEL = "claude-opus-4-8"
-DEFAULT_CRITIC_MODEL = "claude-sonnet-4-6"
-DEFAULT_JUDGE_MODEL = "claude-opus-4-8"
+# Locked per-role defaults. Adversarial diversity is cross-FAMILY (Claude vs
+# GPT), so every Claude-side role runs Opus 4.8 and the codex critic runs
+# GPT-5.5. These mirror the HarnessConfig defaults; the config is the source of
+# truth and the factory reads from it.
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+DEFAULT_CODEX_MODEL = "gpt-5.5"
 
-# Env var names for the per-role model overrides (shared vocabulary with
-# harness.HarnessConfig so the two stay in lockstep).
-PROPOSER_MODEL_ENV = "SPARKLE_PROPOSER_MODEL"
-CRITIC_MODEL_ENV = "SPARKLE_CRITIC_MODEL"
-JUDGE_MODEL_ENV = "SPARKLE_JUDGE_MODEL"
-EVIDENCE_MODEL_ENV = "SPARKLE_EVIDENCE_MODEL"
-SYNTHESIZER_MODEL_ENV = "SPARKLE_SYNTHESIZER_MODEL"
+# Backend family ids the factory dispatches on. These are the literal strings a
+# HarnessConfig returns from ``backend_for_role`` / ``family_for_author``.
+FAMILY_CLAUDE = "claude"
+FAMILY_CODEX = "codex"
 
-# The SDK reads this; we read it too so a missing key is a clear error.
-API_KEY_ENV = "ANTHROPIC_API_KEY"
+# CLI binary names looked up on PATH (used for the actionable missing-CLI hint).
+CLAUDE_BIN = "claude"
+CODEX_BIN = "codex"
 
-# The pip hint the CLI surfaces on ImportError. Kept here so the message is
-# defined once next to the lazy import that can raise it.
-INSTALL_HINT = "pip install 'sparkle[agents]'"
-
-# Conservative default cap on generated tokens per move. The engine's role
-# prompts ask for a single small JSON object, so this is plenty; it is exposed
-# as a constructor knob for callers who want to widen it.
-DEFAULT_MAX_TOKENS = 1024
+# Per-call subprocess timeout (seconds). codex in particular runs at high
+# reasoning effort and is token-heavy, so the default is generous; both thinkers
+# expose it as a constructor knob.
+DEFAULT_TIMEOUT_SECONDS = 600
 
 
-class AnthropicThinker:
-    """A live thinker backed by the official Anthropic Python SDK Messages API.
+# A runner wraps subprocess.run so tests can inject a fake. It takes the argv
+# list plus a kwargs dict (cwd / timeout / input / capture_output / text /
+# check) and returns something shaped like a CompletedProcess (returncode,
+# stdout, stderr).
+Runner = Callable[[list[str], "dict[str, Any]"], "subprocess.CompletedProcess[str]"]
+
+
+def _default_runner(
+    argv: list[str], kwargs: dict[str, Any]
+) -> "subprocess.CompletedProcess[str]":
+    """The real runner: a thin wrapper over :func:`subprocess.run`.
+
+    Kept tiny and side-effect-free apart from the spawn so the injected fake
+    runner in the tests is a drop-in replacement (same signature, same return
+    shape). ``check=False`` because each thinker inspects the return code itself
+    to raise a clear, family-tagged error.
+    """
+    return subprocess.run(argv, **kwargs)  # noqa: S603 - argv is fully constructed by us
+
+
+class ClaudeCliThinker:
+    """A live thinker backed by the ``claude -p`` command-line tool (Claude Max).
 
     Structurally satisfies the ``Thinker`` protocol declared in
     :mod:`sparkle.harness` (a single ``think`` method) without inheriting from
     it — the engine duck-types, so no shared base class and no import of the
     harness is required here.
 
-    The ``anthropic`` package is imported lazily inside :meth:`__init__`, so
-    importing this module never requires the ``sparkle[agents]`` extra. The
-    client is created once and reused across ``think`` calls. No request is sent
-    until :meth:`think` is called.
+    The thinker is locked down for adversarial use: it grants the model NO tools
+    (empty ``--allowedTools`` set) and runs it in a fresh, isolated working
+    directory (a throwaway tempdir, removed after the call) so it cannot read or
+    touch this repository while answering. The one-shot ``-p`` mode has no
+    separate system channel, so the engine's system prompt is folded into the
+    prompt text. No process is spawned until :meth:`think` is called.
 
-    :param model: the Claude model id this thinker calls (e.g.
-        ``"claude-opus-4-8"``).
-    :param api_key: optional explicit key; defaults to the
-        ``ANTHROPIC_API_KEY`` environment variable.
-    :param max_tokens: cap on generated tokens per :meth:`think` call.
-    :param client: optional pre-built client (mainly for testing the call
-        shape without the SDK installed); when given, the lazy ``anthropic``
-        import is skipped entirely.
-    :raises ImportError: if ``anthropic`` is not installed and no ``client`` was
-        supplied. The message includes the ``pip install 'sparkle[agents]'``
-        hint.
-    :raises RuntimeError: if no key is available (neither ``api_key`` nor the
-        ``ANTHROPIC_API_KEY`` environment variable).
+    :param model: the Claude model id passed to ``--model`` (defaults to Opus
+        4.8, the locked Claude-side model for every role).
+    :param runner: an injected callable wrapping :func:`subprocess.run` (the test
+        seam); defaults to the real runner.
+    :param timeout: per-call subprocess timeout in seconds.
     """
+
+    family = FAMILY_CLAUDE
 
     def __init__(
         self,
-        model: str,
+        model: str = DEFAULT_CLAUDE_MODEL,
         *,
-        api_key: str | None = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
-        client: Any | None = None,
+        runner: Runner | None = None,
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         if not model:
-            raise ValueError("AnthropicThinker requires a non-empty model id")
-
+            raise ValueError("ClaudeCliThinker requires a non-empty model id")
         self.model = model
-        self.max_tokens = max_tokens
-        # Token usage accumulated across think() calls so an engine cost ceiling
-        # can read it. Starts at zero; updated from each response's usage block.
-        self.input_tokens = 0
-        self.output_tokens = 0
+        self.timeout = timeout
+        self._runner: Runner = runner if runner is not None else _default_runner
+        # Token usage accumulated across think() calls so the engine's
+        # token-budget ceiling (harness._thinker_tokens reads `tokens_used`) can
+        # observe real spend. Starts at zero; updated from each result element's
+        # usage block when present.
+        self.tokens_used = 0
 
-        if client is not None:
-            # Injected client (test seam): trust the caller; do not touch the
-            # SDK or the environment so this path needs neither the package nor
-            # a key.
-            self._client = client
-            return
+    def _build_argv(self, *, system: str, prompt: str) -> list[str]:
+        """Construct the exact ``claude`` argv, including the tool lockdown.
 
-        # Resolve the key BEFORE the network is ever touched so a missing key is
-        # a clear, actionable error rather than a deep SDK auth failure.
-        resolved_key = api_key if api_key is not None else os.environ.get(API_KEY_ENV)
-        if not resolved_key:
-            raise RuntimeError(
-                "no Anthropic API key found; set the "
-                f"{API_KEY_ENV} environment variable to run the live "
-                "adversarial loop (the autonomous engine can also be driven by "
-                "a stub thinker with no key for testing)"
-            )
-
-        # LAZY import — the entire reason this module exists. Importing
-        # sparkle.thinker must work with zero third-party packages; only
-        # constructing the real thinker pulls in the SDK.
-        try:
-            from anthropic import Anthropic  # type: ignore import-not-found
-        except ImportError as exc:  # pragma: no cover - exercised only off-suite
-            raise ImportError(
-                "the Anthropic SDK is required to run the live adversarial loop; "
-                f"install the agents extra with: {INSTALL_HINT}"
-            ) from exc
-
-        self._client = Anthropic(api_key=resolved_key)
+        Tool lockdown: ``--allowedTools`` with an empty allow-set so the model
+        can answer but is granted no tool it could use to touch the repo. Split
+        out so the test suite can assert the argv shape (model id, json output
+        format, and the lockdown flag) without spawning the CLI.
+        """
+        folded = _fold_system(system, prompt)
+        return [
+            CLAUDE_BIN,
+            "-p",
+            folded,
+            "--model",
+            self.model,
+            "--output-format",
+            "json",
+            # Tool lockdown: empty allow-set grants no tools.
+            "--allowedTools",
+            "",
+        ]
 
     def think(
         self,
@@ -164,162 +156,391 @@ class AnthropicThinker:
         prompt: str,
         context: dict[str, Any] | None = None,
     ) -> str:
-        """Send one system+user turn to the model and return its text.
+        """Run one ``claude -p`` turn in an isolated dir and return its text.
 
-        Satisfies the engine's ``Thinker`` contract: a single text blob comes
-        back; the calling role agent is responsible for parsing a structured
-        move out of it. The engine never assumes JSON-mode, tool-calling, or
-        streaming — this method does a plain single-shot Messages call.
+        ``role`` is informational (this thinker is bound to one model via the
+        factory, which builds a separate instance per role). ``context`` is the
+        engine's frontier snapshot; the engine bakes whatever the model needs
+        into ``system``/``prompt``, so it is accepted and ignored here.
 
-        ``role`` is informational here (this thinker is already bound to one
-        model via :attr:`model`); the per-role model selection happens in the
-        factory, which builds a separate thinker per role. ``context`` is the
-        engine's frontier/subgraph snapshot; it is not sent verbatim — the
-        engine bakes whatever the model needs into ``system``/``prompt`` — so it
-        is accepted and ignored here.
-
-        :returns: the concatenated text of all text blocks in the response. An
-            empty string if the response carried no text blocks.
+        :raises RuntimeError: on timeout, non-zero exit, malformed JSON, a
+            result element flagged ``is_error``, or an empty answer. A crash is
+            never returned as a valid answer — the engine records it as a failed
+            move.
         """
         _ = role, context  # accepted for protocol parity; not used by this thinker
 
-        message = self._client.messages.create(
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        argv = self._build_argv(system=system, prompt=prompt)
+        workdir = tempfile.mkdtemp(prefix="sparkle-claude-")
+        try:
+            proc = _run(
+                self._runner,
+                argv,
+                cwd=workdir,
+                timeout=self.timeout,
+                family=FAMILY_CLAUDE,
+            )
+            _check_returncode(proc, family=FAMILY_CLAUDE)
+            return self._parse(proc.stdout)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
 
-        # Accumulate usage if the SDK reported it, so an engine cost ceiling can
-        # observe real token spend. Guarded because a stub/fake client may omit
-        # it.
-        usage = getattr(message, "usage", None)
-        if usage is not None:
-            self.input_tokens += int(getattr(usage, "input_tokens", 0) or 0)
-            self.output_tokens += int(getattr(usage, "output_tokens", 0) or 0)
+    def _parse(self, stdout: str | None) -> str:
+        """Parse the claude JSON event array and return the result text.
 
-        return _extract_text(message)
+        stdout is a single JSON array of events; the answer lives in the element
+        whose ``type`` is ``"result"``. If that element is flagged
+        ``is_error`` the run failed and we raise. Token usage is accumulated from
+        the result element's ``usage`` block when present.
+        """
+        if not stdout or not stdout.strip():
+            raise RuntimeError("claude CLI returned empty output")
+        try:
+            events = json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"claude CLI returned malformed JSON: {exc}"
+            ) from exc
 
-    @property
-    def total_tokens(self) -> int:
-        """Total input+output tokens seen across all :meth:`think` calls."""
-        return self.input_tokens + self.output_tokens
-
-
-def _extract_text(message: Any) -> str:
-    """Join the text of every text block in a Messages API response.
-
-    The SDK returns ``message.content`` as a list of content blocks; text blocks
-    have ``type == "text"`` and a ``.text`` attribute. Tool-use or other block
-    types are skipped. Returns ``""`` if there is no text. Defensive against a
-    response object that exposes ``content`` as dicts rather than typed blocks.
-    """
-    content = getattr(message, "content", None)
-    if content is None:
-        return ""
-
-    parts: list[str] = []
-    for block in content:
-        block_type = getattr(block, "type", None)
-        if block_type is None and isinstance(block, dict):
-            block_type = block.get("type")
-        if block_type != "text":
-            continue
-        text = getattr(block, "text", None)
-        if text is None and isinstance(block, dict):
-            text = block.get("text")
-        if text:
-            parts.append(text)
-
-    return "".join(parts)
-
-
-def _role_model_ids() -> dict[str, str]:
-    """Resolve the per-role model ids from the environment, with locked defaults.
-
-    The only LOCKED constraint is critic_model != proposer_model; that is
-    enforced by :func:`build_role_thinkers`, not here, so this helper stays a
-    pure read.
-    """
-    proposer = os.environ.get(PROPOSER_MODEL_ENV, DEFAULT_PROPOSER_MODEL)
-    critic = os.environ.get(CRITIC_MODEL_ENV, DEFAULT_CRITIC_MODEL)
-    judge = os.environ.get(JUDGE_MODEL_ENV, DEFAULT_JUDGE_MODEL)
-    # evidence_gatherer defaults to the critic model, synthesizer to the judge
-    # model (per the spec); both are independently env-overridable.
-    evidence = os.environ.get(EVIDENCE_MODEL_ENV, critic)
-    synthesizer = os.environ.get(SYNTHESIZER_MODEL_ENV, judge)
-    return {
-        "proposer": proposer,
-        "critic": critic,
-        "judge": judge,
-        "evidence_gatherer": evidence,
-        "synthesizer": synthesizer,
-    }
-
-
-def build_role_thinkers(
-    config: Any | None = None,
-    *,
-    api_key: str | None = None,
-    max_tokens: int = DEFAULT_MAX_TOKENS,
-) -> dict[str, AnthropicThinker]:
-    """Build one live thinker per debate role from the per-role model ids.
-
-    This is the live-path factory the CLI ``run`` command uses. When a
-    :class:`~sparkle.harness.HarnessConfig` is passed, the per-role model ids and
-    the locked adversary invariants come from it (one source of truth shared with
-    the engine, so the factory and the engine can never drift). When no config is
-    given, the model ids are read from the environment with the locked defaults,
-    and the critic-vs-proposer invariant is enforced here as a fallback.
-
-    :param config: an optional object exposing ``model_for_role(role)`` (the
-        engine's :class:`HarnessConfig`). When given, its ``__post_init__``
-        already enforced critic != proposer and evidence != proposer, so the
-        factory trusts those and just reads each role's model id from it.
-    :returns: a dict mapping each role name (``proposer``, ``critic``,
-        ``judge``, ``evidence_gatherer``, ``synthesizer``) to its
-        :class:`AnthropicThinker`. Roles that share a model id still get
-        separate thinker instances so each keeps its own token tally and a
-        distinct author identity downstream.
-    :raises ValueError: if the resolved critic model equals the proposer model
-        (the adversary would not be a genuinely different model). Only checked
-        here when no ``config`` was supplied; the config enforces it itself.
-    :raises ImportError: if the Anthropic SDK is not installed (message carries
-        the ``pip install 'sparkle[agents]'`` hint).
-    :raises RuntimeError: if no key is available in ``ANTHROPIC_API_KEY``.
-    """
-    if config is not None:
-        roles = ("proposer", "critic", "judge", "evidence_gatherer", "synthesizer")
-        models = {role: config.model_for_role(role) for role in roles}
-    else:
-        models = _role_model_ids()
-        if models["critic"] == models["proposer"]:
-            raise ValueError(
-                "critic model must differ from proposer model so the adversary "
-                "is a genuinely different model, not the proposer rephrasing "
-                f"itself; set {CRITIC_MODEL_ENV} to a model different from "
-                f"{PROPOSER_MODEL_ENV} (both are currently {models['proposer']!r})"
+        result_el = _find_result_element(events)
+        if result_el is None:
+            raise RuntimeError(
+                "claude CLI output had no result element (no event with "
+                'type == "result")'
+            )
+        if result_el.get("is_error"):
+            raise RuntimeError(
+                "claude CLI reported an error result: "
+                f"{result_el.get('result') or result_el}"
             )
 
-    thinkers: dict[str, AnthropicThinker] = {}
-    for role, model_id in models.items():
-        # Each role gets its own thinker instance even when two roles share a
-        # model id: separate contexts, separate token tallies, and a distinct
-        # author identity per role downstream in the engine. The first
-        # construction performs the lazy SDK import and the key check; if those
-        # fail, the error propagates to the CLI on the first role.
-        thinkers[role] = AnthropicThinker(
-            model_id, api_key=api_key, max_tokens=max_tokens
-        )
+        answer = result_el.get("result")
+        if not isinstance(answer, str) or not answer.strip():
+            raise RuntimeError("claude CLI result element carried no answer text")
 
+        self.tokens_used += _claude_usage_tokens(result_el.get("usage"))
+        return answer
+
+
+class CodexCliThinker:
+    """A live thinker backed by the ``codex exec`` command-line tool (GPT-5.5).
+
+    Structurally satisfies the ``Thinker`` protocol. Locked down for adversarial
+    use: it runs ``codex`` with the read-only sandbox in a fresh, isolated
+    working directory (``-C <tempdir>``) so it cannot mutate anything, and reads
+    the final answer from the ``--output-last-message`` file written inside that
+    tempdir (stdout is ignored for the answer). The whole tempdir is removed
+    after the call. No process is spawned until :meth:`think` is called.
+
+    :param model: the model id passed to ``-m`` (defaults to GPT-5.5).
+    :param runner: an injected callable wrapping :func:`subprocess.run` (the test
+        seam); defaults to the real runner.
+    :param timeout: per-call subprocess timeout in seconds.
+    :param reasoning_effort: optional override appended as
+        ``-c model_reasoning_effort=<value>``. Default ``None`` leaves the user's
+        codex config in charge (codex already runs at high effort by default).
+    """
+
+    family = FAMILY_CODEX
+
+    def __init__(
+        self,
+        model: str = DEFAULT_CODEX_MODEL,
+        *,
+        runner: Runner | None = None,
+        timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        reasoning_effort: str | None = None,
+    ) -> None:
+        if not model:
+            raise ValueError("CodexCliThinker requires a non-empty model id")
+        self.model = model
+        self.timeout = timeout
+        self.reasoning_effort = reasoning_effort
+        self._runner: Runner = runner if runner is not None else _default_runner
+        # Mirrors ClaudeCliThinker: the engine reads `tokens_used` for its budget
+        # ceiling. The codex CLI does not surface per-call token usage on the
+        # answer file, so this stays at zero unless a future codex flag exposes
+        # it; the ceiling simply never trips on codex spend.
+        self.tokens_used = 0
+
+    def _build_argv(self, *, system: str, prompt: str, workdir: str, answer_file: str) -> list[str]:
+        """Construct the exact ``codex exec`` argv.
+
+        Isolated cwd via ``-C <workdir>``; read-only sandbox; the final answer is
+        written to ``answer_file`` (inside the same tempdir) via
+        ``--output-last-message``. ``--skip-git-repo-check`` because the throwaway
+        tempdir is not a git repo. Split out so tests can assert the argv shape
+        (model, sandbox, isolated cwd, output file, and any reasoning-effort
+        override) without spawning the CLI.
+        """
+        folded = _fold_system(system, prompt)
+        argv = [
+            CODEX_BIN,
+            "exec",
+            folded,
+            "-m",
+            self.model,
+            "--sandbox",
+            "read-only",
+            "--skip-git-repo-check",
+            "-C",
+            workdir,
+            "--output-last-message",
+            answer_file,
+        ]
+        if self.reasoning_effort:
+            argv += ["-c", f"model_reasoning_effort={self.reasoning_effort}"]
+        return argv
+
+    def think(
+        self,
+        *,
+        role: str,
+        system: str,
+        prompt: str,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Run one ``codex exec`` turn in an isolated dir and return its text.
+
+        ``role`` and ``context`` are accepted for protocol parity and ignored
+        (the factory binds one instance per role; the engine bakes context into
+        the prompt).
+
+        :raises RuntimeError: on timeout, non-zero exit, or an empty/missing
+            answer file. A crash is never returned as a valid answer.
+        """
+        _ = role, context  # accepted for protocol parity; not used by this thinker
+
+        workdir = tempfile.mkdtemp(prefix="sparkle-codex-")
+        answer_file = os.path.join(workdir, "last-message.txt")
+        argv = self._build_argv(
+            system=system, prompt=prompt, workdir=workdir, answer_file=answer_file
+        )
+        try:
+            proc = _run(
+                self._runner,
+                argv,
+                cwd=workdir,
+                timeout=self.timeout,
+                family=FAMILY_CODEX,
+            )
+            _check_returncode(proc, family=FAMILY_CODEX)
+            return self._read_answer(answer_file)
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+    def _read_answer(self, answer_file: str) -> str:
+        """Read the final-message file codex wrote; raise if it is missing/empty."""
+        try:
+            with open(answer_file, "r", encoding="utf-8") as handle:
+                answer = handle.read()
+        except OSError as exc:
+            raise RuntimeError(
+                "codex CLI wrote no answer file "
+                f"({os.path.basename(answer_file)} missing): {exc}"
+            ) from exc
+        if not answer or not answer.strip():
+            raise RuntimeError("codex CLI answer file was empty")
+        return answer
+
+
+class ScriptedThinker:
+    """A deterministic, network-free stub thinker for key-free / test runs.
+
+    Spawns no process and needs no CLI. It returns canned text keyed by ``role``
+    (falling back to a constant default), so non-test callers have a thinker that
+    drives the engine end-to-end with zero dependencies. The harness test suite
+    ships its own richer stub; this one exists so importing :mod:`sparkle.thinker`
+    always yields a usable, side-effect-free thinker.
+
+    :param responses: optional mapping of role name -> canned answer text.
+    :param default: text returned for any role not in ``responses``.
+    """
+
+    family = "stub"
+
+    def __init__(
+        self,
+        responses: dict[str, str] | None = None,
+        *,
+        default: str = "{}",
+    ) -> None:
+        self.responses = dict(responses or {})
+        self.default = default
+        # Present so the engine's duck-typed token reader finds it; a stub spends
+        # no tokens, so the budget ceiling never trips on it.
+        self.tokens_used = 0
+
+    def think(
+        self,
+        *,
+        role: str,
+        system: str,
+        prompt: str,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        _ = system, prompt, context  # accepted for protocol parity; not used
+        return self.responses.get(role, self.default)
+
+
+# Backwards-friendly alias: the harness test suite and other callers may refer
+# to a "stub thinker". Both names point at the same deterministic class.
+StubThinker = ScriptedThinker
+
+
+# ---------------------------------------------------------------------------
+# Per-role factory — builds CLI thinkers from the config's role->backend map
+# ---------------------------------------------------------------------------
+
+
+_ROLES = ("proposer", "critic", "judge", "evidence_gatherer", "synthesizer")
+
+
+def build_role_thinkers(config: Any) -> dict[str, Any]:
+    """Build one CLI thinker per debate role from the config's backend map.
+
+    For each of the five roles the engine drives, this reads the backend FAMILY
+    (``config.backend_for_role(role)`` -> ``"claude"`` | ``"codex"``) and the
+    model id (``config.model_for_role(role)``) and constructs the matching CLI
+    thinker. Each role gets its OWN instance even when two roles share a backend
+    and model, so each keeps a separate token tally and a distinct author
+    identity downstream in the engine.
+
+    No SDK import, no api-key param, no key check. The missing-binary check is a
+    runtime concern surfaced by :func:`missing_clis` (which the CLI ``run``
+    command calls to print an actionable hint) — the factory itself raises only
+    on an unknown backend family.
+
+    :param config: a :class:`~sparkle.harness.HarnessConfig` exposing
+        ``backend_for_role(role)``, ``model_for_role(role)`` and (optionally) a
+        ``reasoning_effort`` attribute for the codex critic.
+    :returns: a dict mapping each role name to its CLI thinker.
+    :raises ValueError: if a role maps to an unknown backend family.
+    """
+    reasoning_effort = getattr(config, "reasoning_effort", None) or None
+    thinkers: dict[str, Any] = {}
+    for role in _ROLES:
+        family = config.backend_for_role(role)
+        model = config.model_for_role(role)
+        if family == FAMILY_CLAUDE:
+            thinkers[role] = ClaudeCliThinker(model)
+        elif family == FAMILY_CODEX:
+            thinkers[role] = CodexCliThinker(model, reasoning_effort=reasoning_effort)
+        else:
+            raise ValueError(
+                f"unknown backend family {family!r} for role {role!r}; "
+                f'expected "{FAMILY_CLAUDE}" or "{FAMILY_CODEX}"'
+            )
     return thinkers
 
 
+def missing_clis() -> list[str]:
+    """Return the CLI binaries the live loop needs that are NOT on PATH.
+
+    Pure :func:`shutil.which` lookups — spawns nothing. The CLI ``run`` command
+    calls this to turn a missing binary into an actionable "install + log in to
+    the claude and codex CLIs" hint instead of a raw stack trace at run time.
+    Returns an empty list when both binaries are present.
+    """
+    missing: list[str] = []
+    for binary in (CLAUDE_BIN, CODEX_BIN):
+        if shutil.which(binary) is None:
+            missing.append(binary)
+    return missing
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+
+def _fold_system(system: str, prompt: str) -> str:
+    """Fold the system prompt into the one-shot prompt text.
+
+    Neither ``claude -p`` nor ``codex exec`` has a separate system channel, so
+    the engine's system instruction is prepended to the user prompt with a blank
+    line between them. An empty system is dropped so the prompt is unchanged.
+    """
+    if system:
+        return f"{system}\n\n{prompt}"
+    return prompt
+
+
+def _run(
+    runner: Runner,
+    argv: list[str],
+    *,
+    cwd: str,
+    timeout: int,
+    family: str,
+) -> "subprocess.CompletedProcess[str]":
+    """Invoke the runner with the standard kwargs and map a timeout to a clear error."""
+    kwargs: dict[str, Any] = {
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout,
+        "cwd": cwd,
+        "check": False,
+    }
+    try:
+        return runner(argv, kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"{family} CLI timed out after {timeout}s"
+        ) from exc
+
+
+def _check_returncode(
+    proc: "subprocess.CompletedProcess[str]", *, family: str
+) -> None:
+    """Raise a clear, family-tagged error on a non-zero exit, with a stderr tail."""
+    if getattr(proc, "returncode", 0) != 0:
+        stderr = (getattr(proc, "stderr", "") or "").strip()
+        tail = stderr[-500:] if stderr else "(no stderr)"
+        raise RuntimeError(
+            f"{family} CLI exited with code {proc.returncode}: {tail}"
+        )
+
+
+def _find_result_element(events: Any) -> dict[str, Any] | None:
+    """Find the ``type == "result"`` element in the claude JSON event array."""
+    if not isinstance(events, list):
+        return None
+    for el in events:
+        if isinstance(el, dict) and el.get("type") == "result":
+            return el
+    return None
+
+
+def _claude_usage_tokens(usage: Any) -> int:
+    """Sum input + output tokens from a claude result element's usage block.
+
+    Defensive: the usage block is optional and its exact shape can vary, so a
+    missing or malformed block contributes zero rather than raising.
+    """
+    if not isinstance(usage, dict):
+        return 0
+    total = 0
+    for key in ("input_tokens", "output_tokens"):
+        value = usage.get(key, 0)
+        try:
+            total += int(value or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
+
+
 __all__ = [
-    "AnthropicThinker",
+    "Runner",
+    "ClaudeCliThinker",
+    "CodexCliThinker",
+    "ScriptedThinker",
+    "StubThinker",
     "build_role_thinkers",
-    "DEFAULT_PROPOSER_MODEL",
-    "DEFAULT_CRITIC_MODEL",
-    "DEFAULT_JUDGE_MODEL",
-    "INSTALL_HINT",
+    "missing_clis",
+    "DEFAULT_CLAUDE_MODEL",
+    "DEFAULT_CODEX_MODEL",
+    "FAMILY_CLAUDE",
+    "FAMILY_CODEX",
+    "DEFAULT_TIMEOUT_SECONDS",
 ]

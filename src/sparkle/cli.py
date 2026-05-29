@@ -18,6 +18,7 @@ import argparse
 from collections import defaultdict
 import json
 from pathlib import Path
+import shutil
 import sys
 
 from . import ops
@@ -39,6 +40,14 @@ def confidence_arg(raw: str) -> float:
 
 
 DEFAULT_STORE = Path(".sparkle/graph.json")
+
+# The autonomous run shells out to two vendor CLIs (verified invocations:
+# `claude -p ...` and `codex exec ...`). Both must be installed and logged in
+# on the user's machine; we check PATH presence before starting a run so the
+# failure is an actionable install/login hint rather than a deep subprocess
+# crash. These are the bare binary names, not pip packages.
+RUN_REQUIRED_CLIS = ("claude", "codex")
+
 TYPE_SYMBOLS = {
     "claim": "C",
     "evidence": "+",
@@ -154,7 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_cmd = subparsers.add_parser(
         "run",
-        help="Run the autonomous adversarial loop (requires the 'sparkle[agents]' extra)",
+        help="Run the autonomous adversarial loop (requires the 'claude' and 'codex' CLIs on PATH)",
     )
     run_cmd.add_argument("seed", help="the seed question or claim to debate")
     run_cmd.add_argument(
@@ -280,16 +289,27 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # The autonomous-run subcommand is a lazy seam exactly like the MCP one:
-    # importing the harness (and, inside run_cli_loop, the real model thinker)
-    # is deferred until asked, so every other command works without the
-    # 'sparkle[agents]' extra. The harness module top-level is stdlib-only; the
-    # only thing that can raise ImportError here is a missing 'anthropic',
-    # imported lazily when run_cli_loop constructs the real per-role thinkers —
-    # so the catch wraps both the import and the call.
+    # importing the harness is deferred until asked, so every other command
+    # works without ever touching the thinker layer. The harness and thinker
+    # modules are now pure stdlib (the run shells out to the `claude` and
+    # `codex` CLIs via subprocess — no SDK, no pip extra), so the import always
+    # succeeds. The real failure is a missing CLI at run time: if either binary
+    # is absent from PATH the run cannot talk to a model, so we check first and
+    # raise an actionable install/login hint through the same ValueError ->
+    # stderr + exit-2 contract every other command uses.
     if getattr(args, "_run", False):
         from .graph import GraphStore
 
         try:
+            missing = [name for name in RUN_REQUIRED_CLIS if shutil.which(name) is None]
+            if missing:
+                raise ValueError(
+                    f"required CLI(s) not found on PATH: {', '.join(missing)}. "
+                    "Install and log in to the claude and codex CLIs "
+                    "(the run uses `claude -p` on your Claude Max login and "
+                    "`codex exec` on your Codex/ChatGPT login), then re-run."
+                )
+
             from .harness import run_cli_loop
 
             result = run_cli_loop(
@@ -299,9 +319,6 @@ def main(argv: list[str] | None = None) -> int:
                 rounds=args.rounds,
                 max_moves=args.max_moves,
             )
-        except ImportError:
-            print("pip install 'sparkle[agents]'", file=sys.stderr)
-            return 2
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2

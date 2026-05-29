@@ -136,11 +136,14 @@ class HarnessEngineTestCase(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _config(self, **overrides) -> HarnessConfig:
-        """A HarnessConfig with locked-distinct models, env-independent.
+        """A HarnessConfig with explicit per-role models, env-independent.
 
-        Set proposer/critic/judge explicitly so the test does not depend on the
-        ambient SPARKLE_*_MODEL env. critic differs from proposer to satisfy the
-        locked invariant.
+        Set proposer/critic/judge models explicitly so the test does not depend
+        on the ambient SPARKLE_*_MODEL env. The backend families are left at
+        their locked defaults (proposer=claude, critic=codex, judge=claude), so
+        the cross-FAMILY invariant — critic family != proposer family — already
+        holds; the model strings are free to overlap because the gate counts the
+        family, not the model tier.
         """
         kwargs = dict(
             proposer_model="model-proposer",
@@ -324,13 +327,13 @@ class HarnessEngineTestCase(unittest.TestCase):
         """The judge ROLE AGENT refuses a self-strawman and records it as
         'refused' (the invariant fired) rather than crashing the loop.
 
-        A same-author objection is also a same-MODEL objection (the proposer
-        author maps to the proposer model), so the engine's judge refuses it at
-        its stronger model-distinctness gate before ever reaching ops.rule. The
-        seam's author-distinctness refusal is exercised directly against ops in
-        test_self_strawman_objection_does_not_ratify; here we assert the agent
-        surfaces a refusal outcome (no crash, no ratification) when the only
-        objection comes from the proposer's own model.
+        A same-author objection is also a same-FAMILY objection (the proposer
+        author maps to the proposer's backend family), so the engine's judge
+        refuses it at its stronger CROSS-FAMILY gate before ever reaching
+        ops.rule. The seam's author-distinctness refusal is exercised directly
+        against ops in test_self_strawman_objection_does_not_ratify; here we
+        assert the agent surfaces a refusal outcome (no crash, no ratification)
+        when the only objection comes from the proposer's own model family.
         """
         # Build a claim + a same-author objection by hand, then run only the
         # judge agent against it.
@@ -344,7 +347,8 @@ class HarnessEngineTestCase(unittest.TestCase):
         )
         claim_id = claim["node_id"]
         # The objection here is authored 'proposer' to match the claim, so it
-        # maps to the proposer's model: not a genuinely different adversary.
+        # maps to the proposer's backend FAMILY: not a genuinely different
+        # adversary (Claude vs GPT).
         ops.add_branch(
             self.store,
             from_ref=claim_id,
@@ -367,8 +371,9 @@ class HarnessEngineTestCase(unittest.TestCase):
         )
         self.assertEqual(outcome.outcome, "refused")
         self.assertIn(
-            "must run on a different model than the proposer", outcome.message
+            "no objection came from a backend FAMILY different", outcome.message
         )
+        self.assertIn("Claude vs GPT", outcome.message)
         # The strawman was NOT ratified: no superseding ratified claim version.
         ratified = [
             n
@@ -546,28 +551,41 @@ class HarnessEngineTestCase(unittest.TestCase):
             [n for n in data["nodes"].values() if n["node_type"] == "objection"], []
         )
 
-    # -- (5) HarnessConfig invariant: critic model != proposer model --------
+    # -- (5) HarnessConfig invariant: critic FAMILY != proposer FAMILY ------
+    #
+    # The locked rebuild moved the adversarial-diversity contract from model
+    # tiers to backend FAMILIES: the adversary must run on a genuinely different
+    # model family (Claude via the claude CLI vs GPT via the codex CLI), not the
+    # proposer rephrasing itself on the same family. The invariant the config
+    # enforces is therefore "critic backend family != proposer backend family",
+    # which these tests assert (the old "critic model must differ" check is gone
+    # because two roles on the same family — e.g. judge and proposer both claude
+    # — legitimately share a model).
 
-    def test_config_rejects_equal_critic_and_proposer_model(self) -> None:
-        """The locked contract: the critic must run on a DIFFERENT model than
-        the proposer, so the adversary is not the proposer rephrasing itself."""
-        with self.assertRaisesRegex(ValueError, "critic model must differ"):
+    def test_config_rejects_same_family_critic_and_proposer(self) -> None:
+        """The locked contract: the critic must run on a DIFFERENT backend family
+        than the proposer, so the adversary is not the proposer rephrasing itself
+        on the same family (Claude vs GPT)."""
+        with self.assertRaisesRegex(ValueError, "critic backend family must differ"):
             HarnessConfig(
-                proposer_model="claude-same",
-                critic_model="claude-same",
-                judge_model="claude-judge",
+                proposer_backend="claude",
+                critic_backend="claude",
+                judge_backend="claude",
             )
 
-    def test_config_rejects_equal_models_from_env(self) -> None:
-        """The same invariant fires when both env overrides are set equal."""
+    def test_config_rejects_same_family_from_env(self) -> None:
+        """The same invariant fires when both env overrides force the proposer
+        and critic onto the same family."""
         saved = {
             k: os.environ.get(k)
-            for k in ("SPARKLE_PROPOSER_MODEL", "SPARKLE_CRITIC_MODEL")
+            for k in ("SPARKLE_PROPOSER_BACKEND", "SPARKLE_CRITIC_BACKEND")
         }
-        os.environ["SPARKLE_PROPOSER_MODEL"] = "claude-twin"
-        os.environ["SPARKLE_CRITIC_MODEL"] = "claude-twin"
+        os.environ["SPARKLE_PROPOSER_BACKEND"] = "codex"
+        os.environ["SPARKLE_CRITIC_BACKEND"] = "codex"
         try:
-            with self.assertRaisesRegex(ValueError, "critic model must differ"):
+            with self.assertRaisesRegex(
+                ValueError, "critic backend family must differ"
+            ):
                 HarnessConfig()
         finally:
             for key, value in saved.items():
@@ -576,20 +594,33 @@ class HarnessEngineTestCase(unittest.TestCase):
                 else:
                     os.environ[key] = value
 
-    def test_default_config_has_distinct_critic_and_proposer(self) -> None:
-        """With no env overrides the locked defaults already satisfy the gate
-        (proposer opus, critic sonnet)."""
+    def test_default_config_has_cross_family_adversary(self) -> None:
+        """With no env overrides the locked defaults already satisfy the gate:
+        proposer=claude family, critic=codex family (a genuinely different
+        family), and the judge MAY share the proposer's family (judge=claude)."""
         saved = {
             k: os.environ.pop(k, None)
             for k in (
-                "SPARKLE_PROPOSER_MODEL",
-                "SPARKLE_CRITIC_MODEL",
-                "SPARKLE_JUDGE_MODEL",
+                "SPARKLE_PROPOSER_BACKEND",
+                "SPARKLE_CRITIC_BACKEND",
+                "SPARKLE_JUDGE_BACKEND",
+                "SPARKLE_EVIDENCE_GATHERER_BACKEND",
+                "SPARKLE_SYNTHESIZER_BACKEND",
             )
         }
         try:
             config = HarnessConfig()
-            self.assertNotEqual(config.critic_model, config.proposer_model)
+            self.assertEqual(config.backend_for_role("proposer"), "claude")
+            self.assertEqual(config.backend_for_role("critic"), "codex")
+            self.assertNotEqual(
+                config.backend_for_role("critic"),
+                config.backend_for_role("proposer"),
+            )
+            # The judge is allowed to share the proposer's family.
+            self.assertEqual(
+                config.backend_for_role("judge"),
+                config.backend_for_role("proposer"),
+            )
             self.assertEqual(config.author_for_role("critic"), "critic")
             self.assertEqual(config.author_for_role("proposer"), "proposer")
         finally:

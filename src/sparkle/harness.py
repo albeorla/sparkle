@@ -1,23 +1,27 @@
 """Sparkle autonomous adversarial harness — the Phase 2 engine + role agents.
 
 This module is the autonomous loop the spec calls for: a proposer states a
-claim, a *different model* attacks it as the critic, evidence gets gathered, a
-judge rules with the distinct-adversary gate ON, and a synthesizer harvests.
-Every graph mutation is driven through :mod:`sparkle.ops`, so the engine
-inherits all of the debate invariants and the Phase-2 integrity floor (the
-self-loop ban + the distinct-adversary check) by construction.
+claim, a critic from a *different model FAMILY* (Claude vs GPT) attacks it,
+evidence gets gathered, a judge rules with the cross-family gate ON, and a
+synthesizer harvests. Every graph mutation is driven through :mod:`sparkle.ops`,
+so the engine inherits all of the debate invariants and the Phase-2 integrity
+floor (the self-loop ban + the distinct-adversary check) by construction, and
+layers a stronger CROSS-FAMILY gate on top: the adversary must be a genuinely
+different backend family, not just a different author string.
 
 Hard boundaries this module respects:
 
 - It imports :mod:`sparkle.ops` and stdlib only. It NEVER imports ``anthropic``
-  and NEVER imports :mod:`sparkle.thinker` at module top. The real model backend
-  is injected as a duck-typed :class:`Thinker`; the live wrapper
-  (:class:`sparkle.thinker.AnthropicThinker`) is imported lazily only inside
+  or ``openai`` and NEVER imports :mod:`sparkle.thinker` at module top. The real
+  model backends are injected as duck-typed :class:`Thinker` objects; the live
+  CLI-backed wrappers (:class:`sparkle.thinker.ClaudeCliThinker` /
+  :class:`sparkle.thinker.CodexCliThinker`) are imported lazily only inside
   :func:`run_cli_loop`.
 - The engine is *pure with respect to the model*: it takes injected per-role
   thinkers, so the whole loop runs against a deterministic stub with no network
-  and no API key. The live three-model debate is a manual human acceptance step,
-  not something this engine validates.
+  and no CLI invocation. The live cross-family debate (Claude via ``claude -p``,
+  GPT via ``codex exec``) is a manual human acceptance step, not something this
+  engine validates.
 
 The contract a role agent enforces: a thinker returns free text; the agent
 extracts a single JSON move object, validates it against that role's allowed
@@ -58,12 +62,14 @@ class Thinker(Protocol):
 
     ``role`` is one of the playbook role names
     (``proposer``/``critic``/``evidence_gatherer``/``judge``/``synthesizer``) so
-    a real thinker can map role -> model id (the critic on a *different* model
-    than the proposer). The stub thinker keys its scripted responses on ``role``.
+    a real thinker can map role -> backend (the critic on a *different* model
+    FAMILY than the proposer). The stub thinker keys its scripted responses on
+    ``role``.
 
-    Because this is a structural ``Protocol``, the real
-    :class:`sparkle.thinker.AnthropicThinker` and the test stub are
-    interchangeable with zero shared base class and zero import of ``anthropic``
+    Because this is a structural ``Protocol``, the real CLI-backed thinkers
+    (:class:`sparkle.thinker.ClaudeCliThinker` /
+    :class:`sparkle.thinker.CodexCliThinker`) and the test stub are
+    interchangeable with zero shared base class and zero import of any model SDK
     by this module.
     """
 
@@ -84,7 +90,9 @@ def _thinker_tokens(thinker: Any) -> int:
     """Best-effort token count for the last/total call of a thinker.
 
     Reads ``thinker.tokens_used`` if present (an int), else 0. Kept duck-typed
-    so the stub and the real SDK wrapper both work without a shared base class.
+    so the stub and the real CLI wrappers both work without a shared base class.
+    The CLI thinkers expose ``tokens_used`` (the name the engine reads), so the
+    token ceiling is actually wired — not a latent dead budget.
     """
     value = getattr(thinker, "tokens_used", 0)
     try:
@@ -98,45 +106,105 @@ def _thinker_tokens(thinker: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
+# Backend family ids. Real adversarial diversity comes from DIFFERENT FAMILIES
+# (Claude vs GPT), not different Claude model tiers — so every Claude-side role
+# runs Opus 4.8 and the genuine adversary is the codex (GPT) critic.
+CLAUDE_FAMILY = "claude"
+CODEX_FAMILY = "codex"
+
+# Locked default per-role backend family. The adversary (critic) MUST be a
+# different family than the proposer; the judge MAY share the proposer family
+# (Albert chose judge=claude). evidence_gatherer's 'oppose' writes the same
+# contradicts edge the cross-family gate counts, so it is held to the adversary
+# bar too (cross-family vs the proposer).
+_DEFAULT_BACKENDS: dict[str, str] = {
+    "proposer": CLAUDE_FAMILY,
+    "critic": CODEX_FAMILY,
+    "judge": CLAUDE_FAMILY,
+    "evidence_gatherer": CLAUDE_FAMILY,
+    "synthesizer": CLAUDE_FAMILY,
+}
+
+# Locked default per-role model id. Opus 4.8 on EVERY claude-side role; the
+# codex critic runs GPT-5.5.
+_DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+_DEFAULT_CODEX_MODEL = "gpt-5.5"
+
+
+def _role_backend_default(role: str) -> str:
+    """Per-role backend family from env (SPARKLE_<ROLE>_BACKEND) or the locked map."""
+    env = os.environ.get(f"SPARKLE_{role.upper()}_BACKEND")
+    return env if env else _DEFAULT_BACKENDS[role]
+
+
+def _role_model_default(role: str) -> str:
+    """Per-role model id from env (SPARKLE_<ROLE>_MODEL) or the family default.
+
+    The default model follows the role's *resolved* backend family: a codex
+    role defaults to GPT-5.5, a claude role to Opus 4.8.
+    """
+    env = os.environ.get(f"SPARKLE_{role.upper()}_MODEL")
+    if env:
+        return env
+    backend = _role_backend_default(role)
+    return _DEFAULT_CODEX_MODEL if backend == CODEX_FAMILY else _DEFAULT_CLAUDE_MODEL
+
+
 @dataclass
 class HarnessConfig:
     """Engine configuration with the locked defaults and the locked invariant.
 
-    Per-role model ids come from env with sane defaults. The one hard,
-    testable contract: the critic model must differ from the proposer model so
-    the adversary is a genuinely different model, not the proposer rephrasing
-    itself. This dataclass holds no API key and imports no ``anthropic`` — it
-    loads in the zero-dependency base test suite.
+    Each role is wired to a backend FAMILY (``claude`` or ``codex``) and a model
+    id, both from env with sane defaults. The one hard, testable contract: the
+    critic's family must differ from the proposer's family, so the adversary is
+    a genuinely different model family (Claude vs GPT), not the proposer
+    rephrasing itself on the same family. This dataclass holds no API key and
+    imports no model SDK — it loads in the zero-dependency base test suite.
+
+    Per-role model ids are still carried (the factory reads ``model_for_role``),
+    but they are NOT what the gate counts — the gate counts the backend FAMILY.
     """
 
+    # --- Per-role backend family (the gate counts THIS) -------------------
+    proposer_backend: str = field(
+        default_factory=lambda: _role_backend_default("proposer")
+    )
+    critic_backend: str = field(
+        default_factory=lambda: _role_backend_default("critic")
+    )
+    judge_backend: str = field(
+        default_factory=lambda: _role_backend_default("judge")
+    )
+    evidence_backend: str = field(
+        default_factory=lambda: _role_backend_default("evidence_gatherer")
+    )
+    synthesizer_backend: str = field(
+        default_factory=lambda: _role_backend_default("synthesizer")
+    )
+
+    # --- Per-role model id (the factory passes THIS to the CLI thinker) ---
     proposer_model: str = field(
-        default_factory=lambda: os.environ.get(
-            "SPARKLE_PROPOSER_MODEL", "claude-opus-4-8"
-        )
+        default_factory=lambda: _role_model_default("proposer")
     )
     critic_model: str = field(
-        default_factory=lambda: os.environ.get(
-            "SPARKLE_CRITIC_MODEL", "claude-sonnet-4-6"
-        )
+        default_factory=lambda: _role_model_default("critic")
     )
     judge_model: str = field(
-        default_factory=lambda: os.environ.get(
-            "SPARKLE_JUDGE_MODEL", "claude-opus-4-8"
-        )
+        default_factory=lambda: _role_model_default("judge")
     )
-    # evidence_gatherer / synthesizer default to the critic / judge model but
-    # are not part of the locked invariant.
     evidence_model: str = field(
-        default_factory=lambda: os.environ.get(
-            "SPARKLE_EVIDENCE_MODEL",
-            os.environ.get("SPARKLE_CRITIC_MODEL", "claude-sonnet-4-6"),
-        )
+        default_factory=lambda: _role_model_default("evidence_gatherer")
     )
     synthesizer_model: str = field(
-        default_factory=lambda: os.environ.get(
-            "SPARKLE_SYNTHESIZER_MODEL",
-            os.environ.get("SPARKLE_JUDGE_MODEL", "claude-opus-4-8"),
-        )
+        default_factory=lambda: _role_model_default("synthesizer")
+    )
+
+    # Optional reasoning-effort override for the codex (GPT) backend. None =
+    # leave the user's codex config alone. Wired into CodexCliThinker by the
+    # factory.
+    reasoning_effort: str | None = field(
+        default_factory=lambda: os.environ.get("SPARKLE_CODEX_REASONING_EFFORT")
+        or None
     )
 
     # Hard runaway backstop, always on. Counts every attempted move across all
@@ -163,31 +231,32 @@ class HarnessConfig:
     # Optional per-phase round override (critique/gather). None = use playbook.
     rounds_override: int | None = None
     # When set, author identities are suffixed with the model id, e.g.
-    # 'critic:claude-sonnet-4-6'. Default off — the bare role name is enough for
-    # the distinct-adversary gate since proposer != critic.
+    # 'critic:gpt-5.5'. Default off — the bare role name is enough for the
+    # cross-family gate since the family is recovered from the role, not the
+    # model id baked into the author string.
     label_with_model: bool = False
 
     def __post_init__(self) -> None:
-        if self.critic_model == self.proposer_model:
+        # Locked invariant: the adversary (critic) MUST be a different backend
+        # FAMILY than the proposer (Claude vs GPT). Different model TIERS on the
+        # same family is NOT adversarial diversity, so the gate counts the
+        # family. The locked default (proposer=claude, critic=codex) satisfies
+        # this.
+        #
+        # NOTE on the evidence gatherer: the locked default backend map puts the
+        # gatherer on the SAME family as the proposer (both claude), so we do
+        # NOT add an evidence!=proposer config invariant — it would make the
+        # locked-default HarnessConfig() un-constructable. The cross-family GATE
+        # at ratification time (see _cross_family_objection) is what protects the
+        # decision: a same-family evidence 'oppose' writes a contradicts edge but
+        # does NOT count toward the gate, so it cannot ratify a same-family
+        # proposer's claim. The gate, not a config invariant, carries this floor.
+        if self.critic_backend == self.proposer_backend:
             raise ValueError(
-                "critic model must differ from proposer model so the adversary "
-                "is a genuinely different model, not the proposer rephrasing "
-                "itself; set SPARKLE_CRITIC_MODEL to a different model"
-            )
-        # The evidence gatherer's 'oppose' move writes the SAME contradicts edge
-        # the distinct-adversary gate counts, so if it ran on the proposer's own
-        # model a single model could write both the claim and the only objection
-        # that ratifies it. The attack must come from a genuinely different model,
-        # so the gatherer is held to the same bar as the critic. (The judge is NOT
-        # constrained here: it writes the ruling, not the objection, and the
-        # locked defaults intentionally share a model between proposer and judge.)
-        if self.evidence_model == self.proposer_model:
-            raise ValueError(
-                "evidence model must differ from proposer model: the evidence "
-                "gatherer's 'oppose' move records the contradicts objection the "
-                "judge counts, so running it on the proposer's own model would let "
-                "one model both make and attack the claim; set "
-                "SPARKLE_EVIDENCE_MODEL to a model different from the proposer"
+                "critic backend family must differ from proposer backend family "
+                "so the adversary is a genuinely different model family (Claude "
+                "vs GPT), not the proposer rephrasing itself on the same family; "
+                "set SPARKLE_CRITIC_BACKEND to a different family"
             )
 
     def model_for_role(self, role: str) -> str:
@@ -200,19 +269,33 @@ class HarnessConfig:
             "synthesizer": self.synthesizer_model,
         }.get(role, self.proposer_model)
 
-    def model_for_author(self, author: str) -> str:
-        """Recover the model id behind an author identity written by a role.
+    def backend_for_role(self, role: str) -> str:
+        """The backend FAMILY id (``claude`` / ``codex``) a role runs on.
+
+        This is what the factory dispatches on and what the cross-family gate
+        counts. An unknown role defaults to the claude family.
+        """
+        return {
+            "proposer": self.proposer_backend,
+            "critic": self.critic_backend,
+            "evidence_gatherer": self.evidence_backend,
+            "judge": self.judge_backend,
+            "synthesizer": self.synthesizer_backend,
+        }.get(role, CLAUDE_FAMILY)
+
+    def family_for_author(self, author: str) -> str:
+        """Recover the backend FAMILY behind an author identity written by a role.
 
         Authors are bare role names by default (``proposer``/``critic``/...), or
-        ``role:model`` when :attr:`label_with_model` is set. An author that maps
-        to no known role (e.g. a human ``local`` write) is treated as its own
-        distinct model — a human objection is genuinely a different adversary —
-        so it returns the author string itself. This lets the engine enforce the
-        locked *model*-distinctness of the adversary, not just author-string
-        distinctness, when the judge rules.
+        ``role:model`` when :attr:`label_with_model` is set (the role prefix is
+        what carries the family). An author that maps to no known role (e.g. a
+        human ``local`` write) is treated as its own distinct family — a human
+        objection is genuinely a different adversary — so it returns the author
+        string itself. This lets the engine enforce the locked *family*-
+        distinctness of the adversary, not just author-string distinctness, when
+        the judge rules.
         """
-        if self.label_with_model and ":" in author:
-            return author.rsplit(":", 1)[1]
+        role = author.rsplit(":", 1)[0] if (self.label_with_model and ":" in author) else author
         known_roles = {
             "proposer",
             "critic",
@@ -220,15 +303,16 @@ class HarnessConfig:
             "judge",
             "synthesizer",
         }
-        if author in known_roles:
-            return self.model_for_role(author)
+        if role in known_roles:
+            return self.backend_for_role(role)
         return author
 
     def author_for_role(self, role: str) -> str:
         """The distinct author identity a role writes with.
 
-        Bare role name by default (sufficient for the distinct-adversary gate
-        because proposer != critic). Optionally suffixed with the model id.
+        Bare role name by default (sufficient because the cross-family gate
+        recovers the family from the role name via :meth:`family_for_author`).
+        Optionally suffixed with the model id.
         """
         if self.label_with_model:
             return f"{role}:{self.model_for_role(role)}"
@@ -268,7 +352,8 @@ ROLE_SYSTEM: dict[str, str] = {
         "Or stop the loop with: {\"move\":\"done\",\"reason\":\"...\"}."
     ),
     "critic": (
-        "You are the CRITIC, running on a DIFFERENT model than the proposer. "
+        "You are the CRITIC, running on a DIFFERENT model family than the "
+        "proposer (Claude vs GPT). "
         "Attack the target claim with the strongest genuine objection — not a "
         "strawman. Return a single JSON object and nothing else:\n"
         '  {"move":"object","target":"<claim handle>",'
@@ -423,29 +508,40 @@ class MoveResult:
         return out
 
 
-def _model_distinct_objection(
+def _cross_family_objection(
     store: GraphStore, claim_id: str, claim_author: str, config: HarnessConfig
 ) -> bool:
-    """True when an inbound ``contradicts`` objection comes from a DIFFERENT model.
+    """True when an inbound ``contradicts`` objection comes from a DIFFERENT FAMILY.
 
     The seam's ``require_distinct_adversary`` gate (in :func:`ops.rule`) enforces a
     different *author string*. That is necessary but not sufficient for the
-    locked Phase-2 decision: the adversary must run on a genuinely DIFFERENT MODEL
-    than the proposer, so the attack is not the proposer's own reasoning
-    rephrased. This engine-side check closes the gap where a role with a distinct
-    author (e.g. the evidence gatherer's ``oppose``) happens to run on the same
-    model as the proposer. The engine's judge requires at least one objection
-    whose author maps to a model different from the claim author's model.
+    locked Phase-2 decision: the adversary must run on a genuinely DIFFERENT
+    backend FAMILY than the proposer (Claude vs GPT), so the attack is not the
+    proposer's own reasoning rephrased on the same family. This engine-side check
+    closes the gap where a role with a distinct author (e.g. the evidence
+    gatherer's ``oppose``) happens to run on the same family as the proposer. The
+    engine's judge requires at least one objection whose author maps to a family
+    different from the claim author's family.
+
+    CHANGE A — a REHOMED contradicts edge does NOT count. When a claim is revised,
+    its inbound objections are copied onto the new version and tagged
+    ``rehomed=True`` for lineage/display. A rewritten claim must earn a FRESH
+    cross-author + cross-family objection before it can be ratified, so a stale
+    copied-over objection is skipped here (mirroring the seam's author-distinct
+    floor, which skips the same edges).
     """
-    claim_model = config.model_for_author(claim_author)
+    claim_family = config.family_for_author(claim_author)
     data = store.read()
     for edge in data["edges"].values():
         if edge["relation"] != "contradicts" or edge["to_id"] != claim_id:
             continue
+        # CHANGE A: a rehomed objection is not a fresh adversary — skip it.
+        if edge.get("metadata", {}).get("rehomed"):
+            continue
         src = data["nodes"].get(edge["from_id"])
         if src is None:
             continue
-        if config.model_for_author(src.get("author", "local")) != claim_model:
+        if config.family_for_author(src.get("author", "local")) != claim_family:
             return True
     return False
 
@@ -566,17 +662,20 @@ class RoleAgent:
                     and _nonempty(move.get("verdict"))
                 ):
                     return MoveResult(self.role, name, "rejected", message="target+verdict required")
-                # Engine-side model-distinctness gate (the locked Phase-2
-                # decision): the seam's require_distinct_adversary only checks the
-                # author STRING differs. Before we let the judge rule, also require
-                # that at least one objection came from a genuinely DIFFERENT
-                # MODEL than the claim's author — otherwise a role with a distinct
-                # author but the proposer's model (e.g. the evidence gatherer's
-                # 'oppose') could ratify a self-attacked claim. Refuse here so the
-                # loop does not settle, exactly as an ops refusal would.
+                # Engine-side cross-FAMILY gate (the locked Phase-2 decision):
+                # the seam's require_distinct_adversary only checks the author
+                # STRING differs. Before we let the judge rule, also require that
+                # at least one objection came from a genuinely DIFFERENT backend
+                # FAMILY than the claim's author (Claude vs GPT) — otherwise a
+                # role with a distinct author but the proposer's family (e.g. the
+                # evidence gatherer's 'oppose') could ratify a self-attacked
+                # claim. A rehomed objection (copied onto a revised claim) does
+                # not count (CHANGE A), so a rewritten claim must earn a fresh
+                # cross-family objection. Refuse here so the loop does not settle,
+                # exactly as an ops refusal would.
                 target_node = ops.get_node(store, move["target"])
                 claim_author = target_node.get("author", "local")
-                if not _model_distinct_objection(
+                if not _cross_family_objection(
                     store, target_node["node_id"], claim_author, self.config
                 ):
                     return MoveResult(
@@ -584,9 +683,10 @@ class RoleAgent:
                         name,
                         "refused",
                         message=(
-                            "no objection came from a model different than the "
-                            "claim's; the adversary must run on a different model "
-                            "than the proposer, not just under a different author"
+                            "no objection came from a backend FAMILY different "
+                            "than the claim's; the adversary must be a different "
+                            "model family (Claude vs GPT), not just a different "
+                            "author"
                         ),
                     )
                 result = ops.rule(
@@ -610,6 +710,12 @@ class RoleAgent:
                     and _nonempty(move.get("content"))
                 ):
                     return MoveResult(self.role, name, "rejected", message="target+title+content required")
+                # CHANGE C: pass run_id= so the new add_node channel forwards the
+                # run stamp to BOTH the synthesis node metadata AND the fused
+                # 'produced' edge. Without this the synthesis->claim edge was
+                # invisible to run_summary/run_diff/rollback. metadata also
+                # carries run_id for the node (an explicit metadata['run_id']
+                # wins over the kwarg in the seam, so the two agree here).
                 result = ops.add_node(
                     store,
                     node_type="synthesis",
@@ -624,6 +730,7 @@ class RoleAgent:
                         "provisional": True,
                     },
                     model_authored=True,
+                    run_id=self.run_id,
                 )
                 outcome = "written" if result.get("created") else "dedup"
                 return MoveResult(self.role, name, outcome, node_id=result["node_id"])
@@ -740,7 +847,7 @@ class AutonomousEngine:
     Construct with a :class:`GraphStore`, a :class:`HarnessConfig`, and either a
     single :class:`Thinker` (used for every role) or a ``dict[str, Thinker]``
     mapping role -> thinker. The engine imports ``ops`` and the ``Thinker``
-    protocol only; it never imports ``anthropic``.
+    protocol only; it never imports ``anthropic`` or ``openai``.
 
     Stop conditions, all enforced:
       - per-phase ``max_iterations`` from the playbook (never exceeded),
@@ -944,25 +1051,48 @@ def run_cli_loop(
     rounds: int | None = None,
     max_moves: int | None = None,
 ) -> dict[str, Any]:
-    """Build the live per-role thinkers, run the engine, print a human summary.
+    """Build the live per-role CLI thinkers, run the engine, print a summary.
 
-    This is the only place that constructs the real model backend, and it does
-    so lazily: importing :mod:`sparkle.thinker` (which lazily imports
-    ``anthropic``) happens HERE, not at module top, so ``from .harness import
-    run_cli_loop`` never transitively requires the ``agents`` extra. If the
-    extra is missing, the import raises :class:`ImportError`, which the CLI
-    catches to print the ``pip install 'sparkle[agents]'`` hint.
+    This is the only place that constructs the real model backends. Importing
+    :mod:`sparkle.thinker` is pure stdlib (no ``anthropic``, no ``openai``), so
+    the import ALWAYS succeeds — there is no pip extra to miss. The real failure
+    is a missing CLI at run time: the live thinkers shell out to ``claude`` /
+    ``codex``. Before building them we check that every backend family the config
+    actually uses has its CLI on PATH, and raise a clear :class:`ValueError`
+    (caught by cli.py -> stderr + exit 2) telling the user to install + log in to
+    the claude and codex CLIs, NOT to pip-install anything.
 
     Returns the engine's run dict (also printed in human form using the
     ``Handle:`` line convention so the output is greppable).
     """
-    # Lazy import — keeps the zero-dependency import path clean. A missing
-    # extra surfaces as ImportError, caught by cli.py.
-    from .thinker import build_role_thinkers  # noqa: PLC0415
+    import shutil  # noqa: PLC0415 - stdlib, local to keep module-top imports lean
 
     config = HarnessConfig(rounds_override=rounds)
     if max_moves is not None:
         config.max_total_moves = max_moves
+
+    # Runtime CLI-presence check (replaces the old pip-extra ImportError path).
+    # Only the families this config actually uses need to be present.
+    roles = ("proposer", "critic", "judge", "evidence_gatherer", "synthesizer")
+    used_families = {config.backend_for_role(role) for role in roles}
+    cli_for_family = {CLAUDE_FAMILY: "claude", CODEX_FAMILY: "codex"}
+    missing = sorted(
+        cli_for_family[fam]
+        for fam in used_families
+        if fam in cli_for_family and shutil.which(cli_for_family[fam]) is None
+    )
+    if missing:
+        raise ValueError(
+            "the adversarial loop runs on the local CLIs, not a Python SDK; "
+            f"required CLI(s) not found on PATH: {', '.join(missing)}. Install "
+            "and log in to the claude and codex CLIs (claude rides your Claude "
+            "Max login, codex rides your Codex/ChatGPT login) — no API key or "
+            "pip extra is needed"
+        )
+
+    # Pure-stdlib import — the factory builds subprocess-backed CLI thinkers and
+    # never imports a model SDK. The missing-binary case is handled above.
+    from .thinker import build_role_thinkers  # noqa: PLC0415
 
     thinkers = build_role_thinkers(config)
     engine = AutonomousEngine(store, thinkers, config)
