@@ -406,12 +406,12 @@ class RatifyRegionTests(RunTestBase):
         """Mirror of sparkle_ratify_region, including its convergence guard."""
         data = self.store.read()
 
-        def already_cleared(node_id: str) -> bool:
+        def superseded_within_run(node_id: str) -> bool:
             for edge in data["edges"].values():
                 if edge["relation"] != "supersedes" or edge["to_id"] != node_id:
                     continue
                 m = data["nodes"].get(edge["from_id"], {}).get("metadata", {})
-                if not m.get("provisional", False) and m.get("ratified_run") == run_id:
+                if m.get("run_id") == run_id:
                     return True
             return False
 
@@ -420,7 +420,7 @@ class RatifyRegionTests(RunTestBase):
             meta = dict(node.get("metadata", {}))
             if not meta.get("provisional"):
                 continue
-            if already_cleared(node["node_id"]):
+            if superseded_within_run(node["node_id"]):
                 continue
             meta["provisional"] = False
             meta["ratified_run"] = run_id
@@ -488,6 +488,19 @@ class RatifyRegionTests(RunTestBase):
             0,
             "region ratify should converge: nothing left to clear on the second pass",
         )
+
+    def test_ratify_region_clears_only_the_live_tip_of_an_in_run_revision(self) -> None:
+        """Within a run, a provisional claim revised mid-run (V1 superseded by V2,
+        both run-tagged + provisional) should have ONLY the live tip V2 cleared,
+        not the dead V1 — otherwise ratify writes a needless cleared copy of V1.
+        Regression for the self-review's within-run double-clear finding.
+        """
+        v1 = self.add_run_node(run_id="sess", title="Claim", content="v1")
+        ops.revise(self.store, v1["node_id"], content="v2 revised")  # carries run_id+provisional fwd
+
+        result = self._ratify_region("sess")
+        # Only the live tip is cleared (count 1), not both V1 and V2.
+        self.assertEqual(result["count"], 1)
 
     def test_ratify_region_rehomes_inbound_edges_onto_accepted_version(self) -> None:
         # A claim with an inbound supporting edge. After region ratify, the
@@ -876,6 +889,41 @@ class ErrorPathTests(RunTestBase):
                 self.store, node_type="synthesis", title="Orphan?", content="x",
                 link_to="ffffffffffff", relation="produced", model_authored=True,
             )
+        self.assertEqual(ops.list_nodes(self.store), [])
+
+    def test_fused_link_prefix_that_collides_after_insert_does_not_orphan(self) -> None:
+        # Regression (self-review found): link_to is a prefix that uniquely
+        # matches an existing node BEFORE the write but the NEW node's id shares
+        # it too. The fix resolves link_to once up front and reuses the full id,
+        # so the edge never re-resolves a now-ambiguous prefix and no orphan is
+        # left. Brute-force a colliding new-node id (~1/16 per try); the FIRST
+        # collision must still succeed and link to the full existing id.
+        a = ops.add_node(self.store, node_type="claim", title="A", content="alpha-seed")
+        prefix = a["node_id"][0]
+        collided = None
+        for i in range(400):
+            r = ops.add_node(
+                self.store, node_type="claim", title="B", content=f"beta-{i}",
+                link_to=prefix, relation="supports", model_authored=True,
+            )
+            # Every fused add (including the colliding one) links to A's FULL id
+            # and never raises/orphans; under the old code the collision raised
+            # 'Ambiguous prefix' AFTER persisting the node.
+            self.assertEqual(r["link"]["to_id"], a["node_id"])
+            if r["node_id"].startswith(prefix):
+                collided = r
+                break
+        self.assertIsNotNone(collided, "expected a colliding node id within 400 tries")
+
+    def test_non_finite_confidence_fails_closed(self) -> None:
+        # NaN/inf/-inf are floats, so they slip the isinstance guard; cap_confidence
+        # now rejects non-finite values itself instead of returning nan/-inf.
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaisesRegex(ValueError, r"confidence must be a (number|finite)"):
+                ops.add_node(
+                    self.store, node_type="claim", title="C", content=f"c-{bad}",
+                    confidence=bad, model_authored=True,
+                )
         self.assertEqual(ops.list_nodes(self.store), [])
 
 

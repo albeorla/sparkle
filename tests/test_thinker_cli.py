@@ -632,6 +632,19 @@ class FactoryTests(unittest.TestCase):
         thinkers = build_role_thinkers(cfg)
         self.assertFalse(thinkers["evidence_gatherer"].web_search)
 
+    def test_evidence_web_search_is_a_real_lever_on_a_genuine_config(self):
+        # The off-switch must work on a REAL HarnessConfig (not just the test
+        # _FakeConfig): the field is declared, defaults on, and turns off the
+        # evidence role's web access when set False.
+        from src.sparkle.harness import HarnessConfig
+
+        on = build_role_thinkers(HarnessConfig())
+        self.assertTrue(on["evidence_gatherer"].web_search)
+        off = build_role_thinkers(HarnessConfig(evidence_web_search=False))
+        self.assertFalse(off["evidence_gatherer"].web_search)
+        # Other roles never get web search regardless.
+        self.assertFalse(on["proposer"].web_search)
+
     def test_threads_reasoning_effort_to_codex_critic(self):
         cfg = _FakeConfig(_LOCKED_BACKENDS, _LOCKED_MODELS, reasoning_effort="high")
         thinkers = build_role_thinkers(cfg)

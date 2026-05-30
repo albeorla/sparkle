@@ -235,6 +235,13 @@ class HarnessConfig:
     # cross-family gate since the family is recovered from the role, not the
     # model id baked into the author string.
     label_with_model: bool = False
+    # The evidence-gatherer role gets real web search by default so it can verify
+    # sources instead of reciting them from memory. Set False (or env
+    # SPARKLE_EVIDENCE_WEB_SEARCH=0) for a fully tool-denied evidence role that
+    # degrades to the same mark-it-unverified honesty floor as the other roles.
+    evidence_web_search: bool = field(
+        default_factory=lambda: os.environ.get("SPARKLE_EVIDENCE_WEB_SEARCH", "1") != "0"
+    )
 
     def __post_init__(self) -> None:
         # Locked invariant: the adversary (critic) MUST be a different backend

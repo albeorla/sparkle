@@ -45,6 +45,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -239,6 +240,14 @@ def cap_confidence(
         raise ValueError(
             f"confidence must be a number between 0.0 and 1.0, got {confidence!r}"
         )
+    # Reject non-finite (NaN / inf / -inf) here rather than leaning on the
+    # downstream Node range check: NaN would slip through min() and the
+    # 'fail closed' contract should hold at this seam. Finite out-of-range stays
+    # CLAMPED (the model-confidence cap), which is intentional.
+    if not math.isfinite(confidence):
+        raise ValueError(
+            f"confidence must be a finite number between 0.0 and 1.0, got {confidence!r}"
+        )
     return min(confidence, cap)
 
 
@@ -389,10 +398,15 @@ def add_node(
     with graph_lock(store):
         # Resolve the fused-link target BEFORE any write so a bad/ambiguous
         # link_to fails closed (clean ValueError) instead of leaving an orphan
-        # node persisted while the caller sees a failure. add_branch already
-        # resolves its parent ref before writing; this brings add_node to parity.
-        if link_to is not None:
-            store.resolve_id(link_to)
+        # node persisted while the caller sees a failure. Capture the RESOLVED id
+        # and reuse it for the edge below: re-resolving the raw prefix after the
+        # new node is inserted could newly become ambiguous (the new node's id
+        # shares the prefix), re-opening the orphan path. A full id fast-paths in
+        # resolve_id regardless of later inserts. (add_branch already resolves its
+        # parent before writing; this brings add_node to parity.)
+        resolved_link_to = (
+            store.resolve_id(link_to) if link_to is not None else None
+        )
         dup = find_duplicate(
             store, node_type=node_type, title=title, content=content
         )
@@ -430,7 +444,7 @@ def add_node(
             link = _add_edge_locked(
                 store,
                 from_ref=node_id,
-                to_ref=link_to,
+                to_ref=resolved_link_to,
                 relation=relation,
                 metadata=link_meta,
                 resolve_from=False,
