@@ -242,6 +242,13 @@ class HarnessConfig:
     evidence_web_search: bool = field(
         default_factory=lambda: os.environ.get("SPARKLE_EVIDENCE_WEB_SEARCH", "1") != "0"
     )
+    # The critic role (the cross-family adversary, codex/GPT) gets real web
+    # search by default so its opposition is source-backed instead of recalled.
+    # Set False (or env SPARKLE_CRITIC_WEB_SEARCH=0) to revert it to a
+    # search-free critic that argues from memory.
+    critic_web_search: bool = field(
+        default_factory=lambda: os.environ.get("SPARKLE_CRITIC_WEB_SEARCH", "1") != "0"
+    )
 
     def __post_init__(self) -> None:
         # Locked invariant: the adversary (critic) MUST be a different backend
@@ -406,6 +413,21 @@ _EVIDENCE_WEB = (
     "item '(recalled, unverified)' rather than inventing a citation."
 )
 
+# The critic now also has real web search (codex server-side), so its mandate
+# mirrors the evidence gatherer's: retrieve the strongest OPPOSING sources and
+# cite the URLs it actually fetched, rather than arguing from memory. If a search
+# fails the "mark it unverified" fallback degrades it to the same honesty floor.
+_CRITIC_WEB = (
+    " You HAVE web search and fetch tools -- USE them. Look up real sources that "
+    "WEAKEN or falsify the claim, and put the actual URLs you retrieved into the "
+    "citations array. Do not assert a counter-figure, statistic, or study you did "
+    "not verify this way. For each load-bearing point, QUOTE the opposing line "
+    "verbatim (or a close paraphrase) from the source you actually retrieved, so "
+    "the objection is visibly grounded in the source text, not merely sitting next "
+    "to a URL. If a search fails or you cannot find a real source, say so plainly "
+    "and mark that item '(recalled, unverified)' rather than inventing a citation."
+)
+
 # Each role's allowed move names and the system instruction that tells the
 # thinker the exact JSON shape to emit. The role agent extracts the first JSON
 # object from the returned text, validates it, and dispatches one ops.* call.
@@ -427,9 +449,10 @@ ROLE_SYSTEM: dict[str, str] = {
         "strawman. Return a single JSON object and nothing else:\n"
         '  {"move":"object","target":"<claim handle>",'
         '"title":"<short objection title>",'
-        '"content":"<what weakens or falsifies the claim>","citations":[]}\n'
+        '"content":"<what weakens or falsifies the claim>",'
+        '"citations":[<retrieved source URLs>]}\n'
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
-        + _RECALL_HONESTY
+        + _CRITIC_WEB
     ),
     "evidence_gatherer": (
         "You are the EVIDENCE GATHERER. The critic already supplies the "

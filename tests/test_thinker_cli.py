@@ -432,6 +432,28 @@ class CodexArgvTests(unittest.TestCase):
         self.assertIn("-c", argv)
         self.assertEqual(_arg_after(argv, "-c"), "model_reasoning_effort=high")
 
+    def test_web_search_appends_tools_web_search_override(self):
+        # The critic (web_search=True) gets codex's server-side web search via the
+        # consecutive tokens `-c tools.web_search=true`, alongside the unchanged
+        # read-only sandbox.
+        runner = CodexFileRunner(write_answer="ok")
+        CodexCliThinker(runner=runner, web_search=True).think(
+            role="critic", system="", prompt="p"
+        )
+        argv = runner.last_argv
+        idx = argv.index("tools.web_search=true")
+        self.assertEqual(argv[idx - 1], "-c")
+        # The sandbox lockdown is untouched by enabling web search.
+        self.assertEqual(_arg_after(argv, "--sandbox"), "read-only")
+
+    def test_no_web_search_by_default(self):
+        # Default off: a search-free codex run carries no web-search override.
+        runner = CodexFileRunner(write_answer="ok")
+        t = CodexCliThinker(runner=runner)
+        self.assertFalse(t.web_search)
+        t.think(role="critic", system="", prompt="p")
+        self.assertNotIn("tools.web_search=true", runner.last_argv)
+
     def test_argv_honors_custom_model(self):
         runner = CodexFileRunner(write_answer="ok")
         CodexCliThinker("gpt-other", runner=runner).think(role="critic", system="", prompt="p")
@@ -613,12 +635,14 @@ class FactoryTests(unittest.TestCase):
         self.assertIsNot(thinkers["proposer"], thinkers["judge"])
         self.assertIsNot(thinkers["proposer"], thinkers["synthesizer"])
 
-    def test_evidence_gatherer_gets_web_search_others_do_not(self):
-        # The evidence gatherer is the one role that can verify sources, so it
-        # alone is built web-enabled; every other Claude role stays deny-all.
+    def test_evidence_gatherer_and_critic_get_web_search_others_do_not(self):
+        # Two roles can search the web: the evidence gatherer (Claude) verifies
+        # SUPPORTING sources, and the critic (Codex) retrieves OPPOSING ones so
+        # its attack is source-backed. Every other role stays deny-all.
         cfg = _FakeConfig(_LOCKED_BACKENDS, _LOCKED_MODELS)
         thinkers = build_role_thinkers(cfg)
         self.assertTrue(thinkers["evidence_gatherer"].web_search)
+        self.assertTrue(thinkers["critic"].web_search)
         self.assertFalse(thinkers["proposer"].web_search)
         self.assertFalse(thinkers["judge"].web_search)
         self.assertFalse(thinkers["synthesizer"].web_search)
@@ -631,6 +655,15 @@ class FactoryTests(unittest.TestCase):
         cfg.evidence_web_search = False
         thinkers = build_role_thinkers(cfg)
         self.assertFalse(thinkers["evidence_gatherer"].web_search)
+
+    def test_critic_web_search_can_be_disabled_via_config(self):
+        # The off-switch: config.critic_web_search = False reverts the critic to a
+        # search-free adversary (the prompt's 'if a search fails, mark unverified'
+        # fallback then keeps it honest).
+        cfg = _FakeConfig(_LOCKED_BACKENDS, _LOCKED_MODELS)
+        cfg.critic_web_search = False
+        thinkers = build_role_thinkers(cfg)
+        self.assertFalse(thinkers["critic"].web_search)
 
     def test_evidence_web_search_is_a_real_lever_on_a_genuine_config(self):
         # The off-switch must work on a REAL HarnessConfig (not just the test

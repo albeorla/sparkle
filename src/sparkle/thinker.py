@@ -303,6 +303,11 @@ class CodexCliThinker:
     :param reasoning_effort: optional override appended as
         ``-c model_reasoning_effort=<value>``. Default ``None`` leaves the user's
         codex config in charge (codex already runs at high effort by default).
+    :param web_search: when True, enable codex's server-side web search
+        (``-c tools.web_search=true``) so the cross-family critic can retrieve
+        real opposing sources instead of arguing from memory. The factory sets it
+        for the critic; it works alongside the read-only sandbox (web search is a
+        server-side tool, so the sandbox does not block it). Default False.
     """
 
     family = FAMILY_CODEX
@@ -314,12 +319,17 @@ class CodexCliThinker:
         runner: Runner | None = None,
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
         reasoning_effort: str | None = None,
+        web_search: bool = False,
     ) -> None:
         if not model:
             raise ValueError("CodexCliThinker requires a non-empty model id")
         self.model = model
         self.timeout = timeout
         self.reasoning_effort = reasoning_effort
+        # When True, this role (the cross-family critic) gets codex's server-side
+        # web search so its opposition is source-backed rather than recalled. The
+        # factory sets it; every other codex use stays search-free.
+        self.web_search = bool(web_search)
         self._runner: Runner = runner if runner is not None else _default_runner
         # Mirrors ClaudeCliThinker: the engine reads `tokens_used` for its budget
         # ceiling. The codex CLI does not surface per-call token usage on the
@@ -333,8 +343,12 @@ class CodexCliThinker:
         Isolated cwd via ``-C <workdir>``; read-only sandbox; the final answer is
         written to ``answer_file`` (inside the same tempdir) via
         ``--output-last-message``. ``--skip-git-repo-check`` because the throwaway
-        tempdir is not a git repo. Split out so tests can assert the argv shape
-        (model, sandbox, isolated cwd, output file, and any reasoning-effort
+        tempdir is not a git repo. When :attr:`web_search` is set (the critic),
+        ``-c tools.web_search=true`` enables codex's server-side web search so the
+        adversary retrieves real opposing sources; it rides alongside the
+        read-only sandbox (web search is server-side, so the sandbox does not
+        block it). Split out so tests can assert the argv shape (model, sandbox,
+        isolated cwd, output file, the web-search toggle, and any reasoning-effort
         override) without spawning the CLI.
         """
         folded = _fold_system(system, prompt)
@@ -352,6 +366,8 @@ class CodexCliThinker:
             "--output-last-message",
             answer_file,
         ]
+        if self.web_search:
+            argv += ["-c", "tools.web_search=true"]
         if self.reasoning_effort:
             argv += ["-c", f"model_reasoning_effort={self.reasoning_effort}"]
         return argv
@@ -487,15 +503,20 @@ def build_role_thinkers(config: Any) -> dict[str, Any]:
         family = config.backend_for_role(role)
         model = config.model_for_role(role)
         if family == FAMILY_CLAUDE:
-            # The evidence gatherer gets real web search so it can verify sources
-            # instead of reciting them from memory; every other Claude role stays
-            # deny-all. Off-switch: config.evidence_web_search = False.
+            # Two roles get real web search; every other role stays deny-all. The
+            # evidence gatherer (Claude) verifies SUPPORTING sources, and the
+            # critic (Codex) retrieves OPPOSING sources so its attack is
+            # source-backed rather than recalled. Off-switches:
+            # config.evidence_web_search / config.critic_web_search = False.
             web = role == "evidence_gatherer" and getattr(
                 config, "evidence_web_search", True
             )
             thinkers[role] = ClaudeCliThinker(model, web_search=web)
         elif family == FAMILY_CODEX:
-            thinkers[role] = CodexCliThinker(model, reasoning_effort=reasoning_effort)
+            web = role == "critic" and getattr(config, "critic_web_search", True)
+            thinkers[role] = CodexCliThinker(
+                model, reasoning_effort=reasoning_effort, web_search=web
+            )
         else:
             raise ValueError(
                 f"unknown backend family {family!r} for role {role!r}; "
