@@ -399,8 +399,11 @@ _EVIDENCE_WEB = (
     " You HAVE web search and fetch tools -- USE them. Look up real sources to "
     "VERIFY the evidence, and put the actual URLs you retrieved into the citations "
     "array. Do not assert a figure, statistic, or study you did not verify this "
-    "way. If a search fails or you cannot find a real source, say so plainly and "
-    "mark that item '(recalled, unverified)' rather than inventing a citation."
+    "way. For each load-bearing figure, QUOTE the supporting line verbatim (or a "
+    "close paraphrase) from the source you actually retrieved, so the number is "
+    "visibly grounded in the source text, not merely sitting next to a URL. If a "
+    "search fails or you cannot find a real source, say so plainly and mark that "
+    "item '(recalled, unverified)' rather than inventing a citation."
 )
 
 # Each role's allowed move names and the system instruction that tells the
