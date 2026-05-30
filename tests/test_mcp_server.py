@@ -482,6 +482,56 @@ class McpServerTestCase(unittest.TestCase):
         empty = self.call_tool("sparkle_run_summary", {"run_id": "no-such-run"})
         self.assertEqual(empty["node_count"], 0)
 
+    def test_branch_and_rule_writes_also_land_in_the_run_region(self) -> None:
+        """Regression: ``sparkle_branch`` and ``sparkle_rule`` must forward run_id.
+
+        Both wrappers take a *required* ``run_id`` but used to drop it on the
+        floor, so the branched objection, the decision, the ratified
+        supersession, and every edge between them fell OUTSIDE the run region --
+        meaning ``run_summary`` / ``run_diff`` / ``rollback_run`` could not treat
+        a debate as one reviewable, rollback-able unit. ``ops.add_branch`` and
+        ``ops.rule`` already accept ``run_id``; the front-end just wasn't passing
+        it. This proves the whole loop now lands in the region.
+        """
+        run_id = "region-branch-rule"
+        claim = self.call_tool(
+            "sparkle_add_node",
+            {
+                "node_type": "claim",
+                "title": "Region claim under debate",
+                "content": "Proposed, then attacked, then ruled -- all one run.",
+                "run_id": run_id,
+            },
+        )
+        self.call_tool(
+            "sparkle_branch",
+            {
+                "from_ref": claim["handle"],
+                "template": "objection",
+                "title": "An attack on the claim",
+                "content": "Here is what could make it false.",
+                "run_id": run_id,
+            },
+        )
+        self.call_tool(
+            "sparkle_rule",
+            {
+                "claim_ref": claim["handle"],
+                "verdict": "Holds despite the objection.",
+                "settle": True,
+                "run_id": run_id,
+            },
+        )
+
+        summary = self.call_tool("sparkle_run_summary", {"run_id": run_id})
+        # original claim + branched objection + decision + ratified supersession
+        self.assertEqual(summary["node_count"], 4)
+        self.assertEqual(summary["nodes_by_type"].get("claim"), 2)
+        self.assertEqual(summary["nodes_by_type"].get("objection"), 1)
+        self.assertEqual(summary["nodes_by_type"].get("decision"), 1)
+        # branch contradicts + two evaluates edges + supersedes edge all stamped
+        self.assertEqual(summary["edge_count"], 4)
+
     def test_ratify_region_clears_provisional_via_supersession(self) -> None:
         """Region sign-off supersedes each provisional node with the flag cleared.
 

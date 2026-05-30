@@ -261,6 +261,7 @@ def build_app() -> FastMCP:
             author=agent_role,
             confidence=confidence,
             tags=tags,
+            run_id=run_id,
             model_authored=True,
         )
         await _notify_changed(ctx)
@@ -294,6 +295,7 @@ def build_app() -> FastMCP:
             settle=settle,
             author="judge",
             confidence=confidence,
+            run_id=run_id,
         )
         await _notify_changed(ctx)
         return result
