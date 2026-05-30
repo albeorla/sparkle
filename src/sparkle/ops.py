@@ -680,6 +680,7 @@ def edge_tally(store: GraphStore, ref: str) -> dict[str, Any]:
     data = store.read()
     counts: dict[str, int] = {}
     has_decision = False
+    superseded_by_ratified = False
     for edge in data["edges"].values():
         if edge["to_id"] != node_id:
             continue
@@ -691,6 +692,16 @@ def edge_tally(store: GraphStore, ref: str) -> dict[str, Any]:
             and src["node_type"] == "decision"
         ):
             has_decision = True
+        # A claim is genuinely ratified (not merely judged) when a SETTLED ruling
+        # wrote a superseding version with status 'ratified' pointing back at it.
+        # This is how the original keeps reading 'ratified' after settle=True
+        # even though its own frozen status stays 'active'.
+        if (
+            src is not None
+            and edge["relation"] == "supersedes"
+            and src.get("status") == "ratified"
+        ):
+            superseded_by_ratified = True
     supports = counts.get("supports", 0)
     contradicts = counts.get("contradicts", 0)
     return {
@@ -701,6 +712,7 @@ def edge_tally(store: GraphStore, ref: str) -> dict[str, Any]:
         "net": supports - contradicts,
         "challenged": contradicts > 0,
         "has_decision": has_decision,
+        "superseded_by_ratified": superseded_by_ratified,
     }
 
 
@@ -729,6 +741,7 @@ def referee_signal(store: GraphStore, ref: str) -> dict[str, Any]:
         "net": tally["net"],
         "challenged": tally["challenged"],
         "has_decision": tally["has_decision"],
+        "superseded_by_ratified": tally.get("superseded_by_ratified", False),
         "live_signal": signal["signal"],
         "why": signal["why"],
     }
@@ -752,6 +765,7 @@ def _apply_transition_rules(
         "contradicts": tally["contradicts"],
         "net": tally["net"],
         "has_decision": tally["has_decision"],
+        "superseded_by_ratified": tally.get("superseded_by_ratified", False),
     }
     for rule_def in rules:
         if _rule_matches(rule_def.get("when", {}), facts):
@@ -769,6 +783,9 @@ def _rule_matches(spec: dict[str, Any], facts: dict[str, Any]) -> bool:
                 return False
         elif key == "has_decision":
             if facts["has_decision"] != expected:
+                return False
+        elif key == "superseded_by_ratified":
+            if facts["superseded_by_ratified"] != expected:
                 return False
         elif key == "supports_min":
             if facts["supports"] < expected:
@@ -821,14 +838,22 @@ BUILTIN_PLAYBOOK: dict[str, Any] = {
     # NEVER on stored confidence (frozen nodes have no rollup).
     "transition_rules": [
         {
-            "when": {"node_type": "claim", "has_decision": True},
-            "signal": "ratified",
-            "why": "a judge's decision evaluates this claim",
-        },
-        {
             "when": {"node_type": "claim", "stored_status": "ratified"},
             "signal": "ratified",
             "why": "stored terminal status from a settled ruling",
+        },
+        {
+            "when": {"node_type": "claim", "superseded_by_ratified": True},
+            "signal": "ratified",
+            "why": "superseded by a ratified version from a settled ruling",
+        },
+        {
+            "when": {"node_type": "claim", "has_decision": True},
+            "signal": "judged",
+            "why": (
+                "a judge has ruled on this claim; read the decision for the "
+                "verdict (a claim reads 'ratified' only when the ruling settled it)"
+            ),
         },
         {
             "when": {"node_type": "claim", "stored_status": "stalled"},

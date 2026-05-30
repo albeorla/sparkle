@@ -161,10 +161,13 @@ class DebateLoopTestCase(unittest.TestCase):
         ratified_id = ratified["node_id"]
         decision_id = ruling["decision"]["node_id"]
 
-        # The decision evaluates BOTH the original and the ratified version, so
-        # the referee reports 'ratified' for each (has_decision drives it).
+        # Both read 'ratified', but for different reasons now: the original is
+        # superseded by the ratified version (superseded_by_ratified), and the
+        # superseding node carries stored_status 'ratified'. A bare decision with
+        # no settlement would read 'judged' instead (see test_referee).
         sig_old = ops.referee_signal(self.store, claim_id)
         self.assertTrue(sig_old["has_decision"])
+        self.assertTrue(sig_old["superseded_by_ratified"])
         self.assertEqual(sig_old["live_signal"], "ratified")
         sig_ratified = ops.referee_signal(self.store, ratified_id)
         self.assertTrue(sig_ratified["has_decision"])
@@ -431,14 +434,16 @@ class DebateLoopTestCase(unittest.TestCase):
         self.assertEqual(len(claims), 1)
         self.assertEqual(self.store.get_node(claim_id)["status"], "active")
 
-        # has_decision is now True, which the live referee reports as 'ratified'
-        # (the 'a judge's decision evaluates this claim' rule fires first), even
-        # though the stored status stayed 'active'. This documents the gap
-        # between the live signal and the stored status for a decision-only rule.
+        # has_decision is True but the ruling did NOT settle, so nothing was
+        # ratified. The live referee reports 'judged' (a decision exists) and
+        # reserves 'ratified' for a claim that was actually settled -- reporting
+        # 'ratified' here would falsely mark a rejected/unsettled claim as
+        # accepted, which corrupts the record an autonomous run produces.
         sig = ops.referee_signal(self.store, claim_id)
         self.assertTrue(sig["has_decision"])
+        self.assertFalse(sig["superseded_by_ratified"])
         self.assertEqual(sig["stored_status"], "active")
-        self.assertEqual(sig["live_signal"], "ratified")
+        self.assertEqual(sig["live_signal"], "judged")
 
     # ----------------------------------------------------------------------
     # rule() refuses a non-claim target before it ever checks for an attack.

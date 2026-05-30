@@ -238,17 +238,40 @@ class TransitionRuleTests(RefereeTestCase):
         self.assertEqual(s["live_signal"], "ratified")
         self.assertEqual(s["why"], "stored terminal status from a settled ruling")
 
-    def test_rule_ratified_fires_on_inbound_decision_even_when_status_active(self) -> None:
-        """{claim, has_decision:True} is ordered first -> 'ratified' regardless
-        of stored status. A decision-node evaluates edge wins over everything."""
-        claim = self._claim()  # status active
+    def test_rule_judged_fires_on_inbound_decision_without_ratification(self) -> None:
+        """{claim, has_decision:True} but NOT ratified -> 'judged', not 'ratified'.
+
+        A judge can rule against a claim (settle=False / a rejecting verdict).
+        That writes a decision but does NOT ratify, so the live signal must read
+        'judged' -- labeling a rejected claim 'ratified' would corrupt the
+        record. 'ratified' is reserved for a claim that was actually settled.
+        """
+        claim = self._claim()  # status active, no ratified supersession
         dec = self._node("decision", "Ruling", "Judged.")
         self.store.add_edge(Edge(from_id=dec, to_id=claim, relation="evaluates"))
         s = self.signal(claim)
         self.assertEqual(s["stored_status"], "active")
         self.assertTrue(s["has_decision"])
+        self.assertEqual(s["live_signal"], "judged")
+
+    def test_rule_ratified_fires_when_superseded_by_a_ratified_version(self) -> None:
+        """A settle=True ruling supersedes the original with a ratified version;
+        the original then reads 'ratified' (via superseded_by_ratified) even
+        though its own frozen status stays 'active'."""
+        claim = self._claim()  # original, status active
+        ratified = self._claim(
+            title="Ratified version", content="Upheld.", status="ratified"
+        )
+        self.store.add_edge(
+            Edge(from_id=ratified, to_id=claim, relation="supersedes")
+        )
+        s = self.signal(claim)
+        self.assertEqual(s["stored_status"], "active")
+        self.assertTrue(s["superseded_by_ratified"])
         self.assertEqual(s["live_signal"], "ratified")
-        self.assertEqual(s["why"], "a judge's decision evaluates this claim")
+        self.assertEqual(
+            s["why"], "superseded by a ratified version from a settled ruling"
+        )
 
     def test_non_claim_node_falls_through_to_default_active_signal(self) -> None:
         """Every transition rule keys node_type:'claim'; a non-claim node never
