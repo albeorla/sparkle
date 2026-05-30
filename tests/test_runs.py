@@ -1074,6 +1074,38 @@ class McpRunClosureTests(unittest.TestCase):
                 run_id="ssr",
             )
 
+    def test_mcp_rule_refuses_to_ratify_a_rejected_verdict(self):
+        # The verdict-rejection floor on the agent-driven MCP path: even with a
+        # genuine cross-author objection, settle=True is refused when the verdict
+        # does not affirm the claim, so an agent cannot stamp 'ratified' on a
+        # claim its own ruling rejects. (settle=False would still record the
+        # decision; only the terminal ratification is blocked.)
+        claim = self._call(
+            "sparkle_add_node",
+            node_type="claim",
+            title="Rejected-verdict claim",
+            content="a claim the judge will reject",
+            run_id="rv",
+            agent_role="proposer",
+        )
+        self._call(
+            "sparkle_branch",
+            from_ref=claim["node_id"],
+            template="objection",
+            title="Critic objection",
+            content="a real cross-author objection",
+            run_id="rv",
+            agent_role="critic",
+        )
+        with self.assertRaisesRegex(ValueError, r"does not affirm"):
+            self._call(
+                "sparkle_rule",
+                claim_ref=claim["node_id"],
+                verdict="refuted",
+                settle=True,
+                run_id="rv",
+            )
+
     def test_mcp_rule_allows_a_cross_author_ruling(self):
         # The positive case: a genuine objection from a DIFFERENT author unlocks
         # the ruling, so the distinct-adversary floor does not block real debate.

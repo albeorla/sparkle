@@ -242,7 +242,7 @@ class McpServerTestCase(unittest.TestCase):
             "sparkle_rule",
             {
                 "claim_ref": claim_handle,
-                "verdict": "reject",
+                "verdict": "upheld",
                 "settle": True,
                 "run_id": run_id,
             },
@@ -521,7 +521,7 @@ class McpServerTestCase(unittest.TestCase):
             "sparkle_rule",
             {
                 "claim_ref": claim["handle"],
-                "verdict": "Holds despite the objection.",
+                "verdict": "upheld",
                 "settle": True,
                 "run_id": run_id,
             },

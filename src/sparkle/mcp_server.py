@@ -52,6 +52,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from . import ops
 from .graph import GraphStore
+from .harness import JUDGE_AFFIRMING_VERDICT
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +199,7 @@ def build_app() -> FastMCP:
             metadata=_provisional_metadata(run_id, agent_role),
             link_to=link_to,
             relation=relation,
+            run_id=run_id,
             model_authored=True,
         )
         await _notify_changed(ctx)
@@ -304,6 +306,7 @@ def build_app() -> FastMCP:
             confidence=confidence,
             run_id=run_id,
             require_distinct_adversary=True,
+            affirming_verdicts=frozenset({JUDGE_AFFIRMING_VERDICT}),
         )
         await _notify_changed(ctx)
         return result
@@ -341,6 +344,7 @@ def build_app() -> FastMCP:
             metadata=_provisional_metadata(run_id, "synthesizer"),
             link_to=from_ref,
             relation="produced",
+            run_id=run_id,
             model_authored=True,
         )
         await _notify_changed(ctx)

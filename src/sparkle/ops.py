@@ -983,6 +983,7 @@ def rule(
     confidence: float | None = 0.8,
     run_id: str | None = None,
     require_distinct_adversary: bool = False,
+    affirming_verdicts: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Record a judge's ruling on a claim — the one move with a hard invariant.
 
@@ -998,6 +999,14 @@ def rule(
     than the claim itself, so a single model cannot ratify its own claim off a
     self-written strawman. The human CLI path leaves this ``False`` (a human is
     trusted), so existing behavior is unchanged.
+
+    ``affirming_verdicts`` (default ``None``) is the verdict-rejection floor: when
+    a frozenset of affirming verdict words is given, a ``settle=True`` ruling whose
+    ``verdict`` is not one of them is REFUSED (so a judge cannot stamp ``ratified``
+    on a claim its own verdict rejects). Default ``None`` keeps the seam verdict-
+    vocabulary-agnostic for the free-text human path; the autonomous front-ends
+    opt in (the agent-driven MCP server passes ``{"upheld"}``). The harness keeps
+    its own equivalent coupling in its dispatch.
 
     ``run_id`` (default ``None``) stamps the decision node, the evaluates edges,
     and — when settled — the ratified claim and its supersedes edge so the whole
@@ -1042,6 +1051,21 @@ def rule(
                 f"claim {claim_id[:12]} is already settled; "
                 "re-settling would fork a second ratified version. "
                 "Re-open it with a fresh claim version (revise) before ruling again"
+            )
+
+        # Verdict-rejection floor (opt-in). The seam stays verdict-vocabulary-
+        # agnostic by default (None) so the free-text human path is unchanged, but
+        # an autonomous front-end can pass the set of affirming verdict words to
+        # forbid ratifying a claim its own verdict rejects. Refuses BEFORE writing
+        # anything, like the challenge and distinct-adversary gates above.
+        if settle and affirming_verdicts is not None and (
+            verdict.strip().lower() not in affirming_verdicts
+        ):
+            raise ValueError(
+                f"verdict {verdict!r} does not affirm the claim, so it may not be "
+                f"ratified; settle requires an affirming verdict "
+                f"({', '.join(sorted(affirming_verdicts))}) or set settle=false "
+                "(the ruling is still recorded, the claim is just not ratified)"
             )
 
         decision = Node(
