@@ -310,6 +310,36 @@ class HarnessEngineTestCase(unittest.TestCase):
         self.assertEqual(manifest["roles"]["critic"]["family"], "codex")
         self.assertEqual(manifest["roles"]["proposer"]["family"], "claude")
 
+    def test_judge_prompt_surfaces_evidence_content_and_retrieved_sources(self) -> None:
+        """The judge must SEE each inbound node's CONTENT and its retrieved-source
+        URLs, not just the title — so it can credit web-verified evidence instead
+        of discounting it as unverified recall. Regression for a real-run gap
+        where the judge said 'no retrieved source URL' about a cited evidence node
+        because the prompt only carried titles.
+        """
+        claim = ops.add_node(
+            self.store, node_type="claim", title="Some claim",
+            content="the claim body", author="proposer",
+        )
+        ops.add_branch(
+            self.store, from_ref=claim["node_id"], template="objection",
+            title="An objection", content="why it might be wrong",
+            author="critic", model_authored=True,
+        )
+        ops.add_node(
+            self.store, node_type="evidence", title="Backing study",
+            content="A 2022 RCT found X.", author="evidence_gatherer",
+            citations=["https://example.org/study"],
+            link_to=claim["node_id"], relation="supports", model_authored=True,
+        )
+
+        prompt, _ = harness._render_prompt(self.store, "judge", "seed?", claim["node_id"])
+        # The retrieved URL and the evidence/objection CONTENT are all visible.
+        self.assertIn("https://example.org/study", prompt)
+        self.assertIn("retrieved sources:", prompt)
+        self.assertIn("A 2022 RCT found X.", prompt)
+        self.assertIn("why it might be wrong", prompt)
+
     # -- (2) The judge's ratification REQUIRED the cross-author challenge ---
 
     def test_self_strawman_objection_does_not_ratify(self) -> None:

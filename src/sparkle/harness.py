@@ -924,10 +924,21 @@ def _render_prompt(
     signal = ops.referee_signal(store, claim_id)
     neighbor_lines = []
     for item in node.get("inbound", []):
-        neighbor_lines.append(
+        line = (
             f"  [{item['handle']}] {item['node_type']} --{item['relation']}--> "
             f"this :: {item['title']} (author={item.get('author', 'local')})"
         )
+        # Surface the neighbor's CONTENT and its retrieved-source URLs, not just
+        # the title: the judge must see the actual objection/evidence text and
+        # the citations the evidence gatherer retrieved, so it can CREDIT
+        # web-verified figures instead of discounting them as unverified recall.
+        content = (item.get("content") or "").strip()
+        if content:
+            line += f"\n      content: {content}"
+        cites = item.get("citations") or []
+        if cites:
+            line += f"\n      retrieved sources: {', '.join(cites)}"
+        neighbor_lines.append(line)
     neighbors_text = "\n".join(neighbor_lines) or "  (no objections or evidence yet)"
     prompt = (
         f"Seed question / topic:\n{seed}\n\n"
