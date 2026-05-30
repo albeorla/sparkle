@@ -179,26 +179,36 @@ class ClaudeArgvTests(unittest.TestCase):
 
     def test_argv_locks_down_permissions_mcp_and_tools(self):
         # The model may reason and answer but is structurally prevented from
-        # acting: permission mode forced to 'default' (so the user's 'dontAsk'
-        # auto-approve cannot run a tool headless), NO MCP servers loaded, and
-        # every execute/mutate/network tool hard-denied. A wrong/missing flag
-        # here is a manual-acceptance risk (tests never spawn the real CLI), so
-        # we pin it explicitly.
+        # acting: it runs with NO tools at all (deny-ALL via `--tools ""`, not a
+        # deny-list), permission mode forced to 'default' (so the user's
+        # 'dontAsk' auto-approve cannot run anything headless), NO MCP servers,
+        # and only user-level settings (so a project/local allow-rule cannot
+        # re-open a tool). A wrong/missing flag here is a manual-acceptance risk
+        # (tests never spawn the real CLI), so we pin it explicitly.
         runner = RecordingRunner(stdout=_claude_result_payload("hi"))
         ClaudeCliThinker(runner=runner).think(role="proposer", system="", prompt="p")
 
         argv = runner.last_argv
         self.assertEqual(_arg_after(argv, "--permission-mode"), "default")
         self.assertIn("--strict-mcp-config", argv)
+        # Deny-ALL: `--tools ""` disables every built-in tool (verified live
+        # against Claude Code 2.1.157 to yield an empty tools array).
+        self.assertEqual(_arg_after(argv, "--tools"), "")
+        # Only user-level settings load — no project/local allow-rules.
+        self.assertEqual(_arg_after(argv, "--setting-sources"), "user")
+        # LSP is the one tool that survives `--tools ""`, so it is denied
+        # explicitly to reach a true zero-tool session.
         self.assertIn("--disallowedTools", argv)
-        for tool in ("Bash", "Write", "Edit", "WebFetch", "WebSearch", "Task"):
-            self.assertIn(tool, argv)
-        # The old empty --allowedTools form did NOT restrict under the user's
-        # 'dontAsk' default, so it must be gone.
+        self.assertIn("LSP", argv)
+        # The old deny-list form (and the even older empty --allowedTools form)
+        # must be gone: no execute/mutate tool names are listed, and no
+        # --allowedTools.
         self.assertNotIn("--allowedTools", argv)
+        for tool in ("Bash", "Write", "Edit", "WebFetch", "Task"):
+            self.assertNotIn(tool, argv)
         # --disallowedTools is variadic, so it must be the final flag (it
         # consumes every trailing token).
-        self.assertEqual(argv[argv.index("--disallowedTools") - 1], "--strict-mcp-config")
+        self.assertEqual(argv.index("--disallowedTools"), len(argv) - 2)
 
     def test_argv_honors_a_custom_model(self):
         runner = RecordingRunner(stdout=_claude_result_payload("hi"))

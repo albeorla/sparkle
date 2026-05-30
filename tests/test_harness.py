@@ -114,14 +114,17 @@ def _happy_script() -> dict[str, object]:
         "evidence_gatherer": gatherer,
         "judge": _move(
             "rule",
-            verdict="reject",
-            rationale="the lyrics objection holds",
+            verdict="upheld",
+            rationale=(
+                "the lyrics objection targets songs with words; the claim is "
+                "about INSTRUMENTAL music, so the objection does not defeat it"
+            ),
             settle=True,
         ),
         "synthesizer": _move(
             "harvest",
-            title="Settled: skip lyrics while coding",
-            content="Lyrics specifically hurt focus.",
+            title="Settled: instrumental music helps coding focus",
+            content="Instrumental music improves focus; the lyrics caveat is separate.",
         ),
     }
 
@@ -414,6 +417,117 @@ class HarnessEngineTestCase(unittest.TestCase):
         self.assertTrue(ruling["settled"])
         self.assertEqual(ruling["ratified_claim"]["status"], "ratified")
 
+    def test_judge_refuted_verdict_records_ruling_but_does_not_ratify(self) -> None:
+        """A judge that asks to settle while its verdict REJECTS the claim has
+        its settle dropped: the ruling is still recorded, but no ratified
+        version is written. Enforces 'never ratify a claim your own verdict
+        rejects' on the autonomous path, where the verdict vocabulary is fixed.
+        """
+        script = {
+            "proposer": _move(
+                "propose", title="A claim", content="A claim to be judged."
+            ),
+            # Cross-family objection (critic=codex vs proposer=claude) so the
+            # judge is allowed to rule.
+            "critic": _move(
+                "object", title="A real attack", content="The critic attacks it."
+            ),
+            "judge": _move(
+                "rule",
+                verdict="refuted",
+                rationale="the objection holds; the claim does not survive",
+                settle=True,
+            ),
+        }
+        thinker = StubThinker(script)
+        engine = AutonomousEngine(self.store, thinker, self._config())
+
+        result = engine.run("seed", run_id="run-refuted")
+
+        data = self.store.read()
+        # The ruling WAS recorded (a decision node evaluates the claim)...
+        decisions = [
+            n for n in data["nodes"].values() if n["node_type"] == "decision"
+        ]
+        self.assertEqual(len(decisions), 1)
+        # ...but the refuted claim was NOT ratified: no superseding version.
+        ratified = [
+            n
+            for n in data["nodes"].values()
+            if n["node_type"] == "claim" and n["status"] == "ratified"
+        ]
+        self.assertEqual(ratified, [])
+        # The dropped-settle is surfaced on the rule move for the run summary.
+        rule_moves = [m for m in result["moves"] if m.get("move") == "rule"]
+        self.assertEqual(len(rule_moves), 1)
+        self.assertEqual(rule_moves[0]["outcome"], "written")
+        self.assertIn("not 'upheld'", rule_moves[0]["message"])
+
+    def test_thinker_backend_failure_is_recorded_not_crashed(self) -> None:
+        """A model-CLI failure (the live thinkers raise RuntimeError) is caught
+        and recorded as a single 'error' move; the loop continues instead of
+        crashing the whole run with a raw traceback."""
+
+        class FlakyThinker(StubThinker):
+            def think(self, *, role, system, prompt, context=None):  # noqa: ANN001
+                if role == "critic":
+                    raise RuntimeError("simulated CLI timeout on the critic")
+                return super().think(
+                    role=role, system=system, prompt=prompt, context=context
+                )
+
+        thinker = FlakyThinker(_happy_script())
+        engine = AutonomousEngine(self.store, thinker, self._config())
+
+        # The whole point: this call must NOT raise.
+        result = engine.run("Does music help coding?", run_id="run-flaky")
+
+        # The critic's backend failure was recorded as an 'error' outcome...
+        self.assertTrue(
+            any(
+                m["role"] == "critic" and m["outcome"] == "error"
+                for m in result["moves"]
+            ),
+            "the critic's RuntimeError should be recorded as an 'error' move",
+        )
+        # ...and the loop continued: the proposer's claim was still produced
+        # before the failure, so the run ended gracefully rather than crashing.
+        self.assertIsNotNone(result["claim_id"])
+
+    def test_max_thinker_calls_spends_exactly_that_many_calls(self) -> None:
+        """The cost ceiling spends EXACTLY ``max_thinker_calls`` model calls, not
+        N+1 (the pre-call check uses ``>=`` against the count already made)."""
+
+        class CountingThinker:
+            family = "stub"
+
+            def __init__(self) -> None:
+                self.calls = 0
+                self.tokens_used = 0
+
+            def think(self, *, role, system, prompt, context=None):  # noqa: ANN001
+                self.calls += 1
+                if role == "proposer":
+                    # A real claim so the loop proceeds into later phases and
+                    # actually has the chance to spend more calls.
+                    return _move(
+                        "propose",
+                        title="Budget claim",
+                        content="A claim to burn budget rounds on.",
+                    )
+                # Malformed (not a 'done') so the critic phase keeps consulting
+                # the thinker until the budget trips.
+                return "no actionable move here"
+
+        thinker = CountingThinker()
+        config = self._config(max_thinker_calls=3)
+        engine = AutonomousEngine(self.store, thinker, config)
+
+        result = engine.run("seed", run_id="run-budget")
+
+        self.assertEqual(thinker.calls, 3)
+        self.assertEqual(result["status"], "cost-ceiling-reached")
+
     # -- (3) Stop conditions: hard cap, done move, frontier-empty -----------
 
     def test_hard_cap_aborts_a_runaway_thinker(self) -> None:
@@ -450,32 +564,66 @@ class HarnessEngineTestCase(unittest.TestCase):
             [n for n in data["nodes"].values() if n["node_type"] == "decision"], []
         )
 
-    def test_done_move_ends_the_loop_immediately(self) -> None:
-        """An explicit done move from any role stops the loop with
-        status='model-stopped'."""
-        # The proposer proposes; the critic immediately says done. The loop ends
-        # right there, before the judge phase.
+    def test_mid_pipeline_done_advances_so_the_judge_still_rules(self) -> None:
+        """A done/stop from a MID-PIPELINE role (critic, evidence gatherer) means
+        'this role is finished' and advances to the next phase — it does NOT
+        abort the whole run. Regression for the footgun where the gatherer's
+        common 'nothing to add' done killed the debate before the judge ruled.
+        """
+        # The critic objects once (cross-family: critic=codex vs proposer=claude),
+        # then the evidence gatherer says done. The judge must STILL get to rule.
+        def critic(index, _context):
+            if index == 0:
+                return _move(
+                    "object",
+                    title="Lyrics distract",
+                    content="Songs with words steal attention.",
+                )
+            return "Objection already lodged; nothing further."
+
         script = {
-            "proposer": _move("propose", title="T", content="A claim."),
-            "critic": _move("done", reason="nothing to attack"),
+            "proposer": _move(
+                "propose",
+                title="Music helps coding",
+                content="Instrumental music improves focus while coding.",
+            ),
+            "critic": critic,
+            "evidence_gatherer": _move("done", reason="no further evidence to add"),
+            "judge": _move(
+                "rule",
+                verdict="upheld",
+                rationale="the lyrics objection is about songs with words, not "
+                "instrumental music",
+                settle=True,
+            ),
+            "synthesizer": _move(
+                "harvest",
+                title="Settled: instrumental music helps focus",
+                content="Instrumental music improves coding focus.",
+            ),
         }
         thinker = StubThinker(script)
         engine = AutonomousEngine(self.store, thinker, self._config())
 
-        result = engine.run("done seed", run_id="run-done")
+        result = engine.run("Does music help coding?", run_id="run-mid-done")
 
-        self.assertEqual(result["status"], "model-stopped")
-        # The proposer wrote a claim before the stop.
-        self.assertIsNotNone(result["claim_id"])
-        # No judge ran, so no decision exists.
+        # The gatherer's done did NOT abort: the judge ran and the run reached
+        # the 'judged' terminal status.
+        self.assertEqual(result["status"], "judged")
         data = self.store.read()
+        decisions = [
+            n for n in data["nodes"].values() if n["node_type"] == "decision"
+        ]
         self.assertEqual(
-            [n for n in data["nodes"].values() if n["node_type"] == "decision"], []
+            len(decisions), 1, "the judge ruled despite the gatherer's done"
         )
-        # The last recorded move is the critic's stop.
-        last = result["moves"][-1]
-        self.assertEqual(last["role"], "critic")
-        self.assertEqual(last["outcome"], "stop")
+        # The upheld ruling ratified the claim.
+        ratified = [
+            n
+            for n in data["nodes"].values()
+            if n["node_type"] == "claim" and n["status"] == "ratified"
+        ]
+        self.assertEqual(len(ratified), 1)
 
     def test_proposer_done_yields_frontier_empty(self) -> None:
         """If the proposer never produces a claim (emits done), later phases

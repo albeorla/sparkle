@@ -962,6 +962,34 @@ class SparkleCliTestCase(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertIn("invalid JSON", err)
 
+    def test_import_rejects_a_terminal_status(self) -> None:
+        """The LLM/batch import on-ramp may not fabricate a ratified claim. A
+        terminal status in imported JSON is refused on the same footing as a
+        model-authored write, so an automated document cannot smuggle its own
+        conclusions in as already-settled with no adversarial ruling."""
+        self.run_cli("init")
+        document = {
+            "nodes": [
+                {
+                    "ref": "c1",
+                    "node_type": "claim",
+                    "title": "Pre-ratified claim",
+                    "content": "A claim that tries to import itself as settled.",
+                    "status": "ratified",
+                }
+            ],
+            "edges": [],
+        }
+        exit_code, output, err = self.run_cli(
+            "import", "-", stdin=json.dumps(document)
+        )
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output, "")
+        self.assertIn("terminal status", err)
+        # Nothing was written: the import was refused before any node landed.
+        store = GraphStore(self.store)
+        self.assertEqual(list(store.list_nodes()), [])
+
     def test_revise_supersedes_and_rehomes_inbound_edges(self) -> None:
         """revise writes a corrected copy and re-points inbound edges by default."""
         self.run_cli("init")

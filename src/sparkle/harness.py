@@ -478,6 +478,30 @@ def _nonempty(value: Any) -> bool:
     return isinstance(value, str) and value.strip() != ""
 
 
+# The judge's system prompt fixes a closed verdict vocabulary
+# (upheld | refuted | overstated) and the settle contract: "settle MUST be true
+# ONLY if you UPHOLD the claim AS STATED ... NEVER ratify a claim your own
+# verdict rejects." The seam (ops.rule) treats verdict as free text on purpose
+# (the human CLI rules with words like "accept"/"needs work"), so the coupling
+# cannot live there. The autonomous judge is the one path with a fixed
+# vocabulary, so the engine enforces it here: a ruling ratifies ONLY on an
+# affirming verdict. Any other verdict still records the ruling, it just does
+# not stamp the terminal `ratified` status — so a non-compliant judge turn
+# cannot permanently mark a claim it rejected as settled-in-its-favor.
+JUDGE_AFFIRMING_VERDICT = "upheld"
+
+
+def _verdict_permits_settle(verdict: Any) -> bool:
+    """True only when the judge's verdict is the affirming token ('upheld').
+
+    Conservative by design: a ratification is permanent and the highest-trust
+    state in the graph, so anything that is not an unambiguous 'upheld'
+    (refuted, overstated, partly true, or any off-vocabulary string) does not
+    settle.
+    """
+    return isinstance(verdict, str) and verdict.strip().lower() == JUDGE_AFFIRMING_VERDICT
+
+
 # ---------------------------------------------------------------------------
 # Role agent — turns thinker text into ONE validated move + one ops.* call
 # ---------------------------------------------------------------------------
@@ -490,6 +514,9 @@ def _nonempty(value: Any) -> bool:
 #   rejected — a required arg was missing/empty
 #   refused  — ops raised ValueError (an invariant fired, correctly)
 #   stop     — the thinker asked to end the loop
+#   error    — the thinker backend itself failed (timeout, non-zero CLI exit,
+#              malformed/empty answer); recorded so one flaky call does not crash
+#              the run
 
 
 @dataclass
@@ -582,9 +609,18 @@ class RoleAgent:
         bad model output or an ops invariant — those are recorded as outcomes.
         """
         system = ROLE_SYSTEM.get(self.role, "")
-        text = thinker.think(
-            role=self.role, system=system, prompt=prompt, context=context
-        )
+        try:
+            text = thinker.think(
+                role=self.role, system=system, prompt=prompt, context=context
+            )
+        except Exception as exc:  # noqa: BLE001 - thinker is a Protocol; stay backend-agnostic
+            # The live CLI thinkers raise RuntimeError on every real failure
+            # (timeout, non-zero exit, malformed JSON, empty answer). Catching a
+            # broad Exception keeps the engine decoupled from the concrete
+            # backend's exception type: one flaky model call is recorded as a
+            # single failed move so the loop continues to the next phase instead
+            # of crashing the whole run with a raw traceback.
+            return MoveResult(self.role, None, "error", message=str(exc))
         move = _extract_move(text)
         if move is None:
             return MoveResult(self.role, None, "malformed", message="no JSON move")
@@ -696,18 +732,36 @@ class RoleAgent:
                             "author"
                         ),
                     )
+                # Couple settle to the verdict (the judge prompt's contract):
+                # only an affirming 'upheld' verdict may ratify. A judge that
+                # asks to settle while its verdict rejects the claim has its
+                # settle dropped — the ruling is still recorded, but the claim is
+                # not stamped 'ratified'. This is the engine's enforcement of
+                # "NEVER ratify a claim your own verdict rejects".
+                requested_settle = bool(move.get("settle", False))
+                settle = requested_settle and _verdict_permits_settle(move["verdict"])
                 result = ops.rule(
                     store,
                     move["target"],
                     verdict=move["verdict"],
                     rationale=move.get("rationale", ""),
-                    settle=bool(move.get("settle", False)),
+                    settle=settle,
                     author=self.author,
                     confidence=0.8,
                     run_id=self.run_id,
                     require_distinct_adversary=True,
                 )
                 node_id = result["decision"]["node_id"]
+                if requested_settle and not settle:
+                    return MoveResult(
+                        self.role, name, "written", node_id=node_id,
+                        message=(
+                            f"verdict {move['verdict']!r} is not "
+                            f"'{JUDGE_AFFIRMING_VERDICT}'; ruling recorded but the "
+                            "claim was NOT ratified (a judge may not settle a "
+                            "claim its own verdict rejects)"
+                        ),
+                    )
                 return MoveResult(self.role, name, "written", node_id=node_id)
 
             if name == "harvest":
@@ -906,7 +960,11 @@ class AutonomousEngine:
 
         def budget_exceeded() -> bool:
             cfg = self.config
-            if cfg.max_thinker_calls is not None and thinker_calls > cfg.max_thinker_calls:
+            # `>=` (not `>`): the pre-call check runs BEFORE the increment, so
+            # `thinker_calls` is the number of calls already made. Stopping when
+            # it has REACHED the max spends exactly `max_thinker_calls` metered
+            # CLI calls, not max+1. Mirrors the `>=` on max_total_moves.
+            if cfg.max_thinker_calls is not None and thinker_calls >= cfg.max_thinker_calls:
                 return True
             if cfg.token_budget is not None:
                 total = 0
@@ -975,8 +1033,17 @@ class AutonomousEngine:
                 moves.append(result.as_dict())
                 rounds_run += 1
 
-                # An explicit done/stop move ends the loop immediately.
+                # A done/stop move is role-scoped, not a global kill switch.
+                # The critic and evidence gatherer run BEFORE the judge, and
+                # "nothing further to add" is their common, correct end-state
+                # (the gatherer's own prompt says the critic supplies the
+                # opposition). For those mid-pipeline roles, done means "this
+                # role is finished" — advance to the next phase so the judge
+                # still rules. Only a terminal role (or the proposer, which has
+                # produced no claim to judge) ends the whole run.
                 if result.outcome == "stop":
+                    if role in ("critic", "evidence_gatherer"):
+                        break  # role done; the phase walk advances to the judge
                     status = "model-stopped"
                     loop_done = True
                     break

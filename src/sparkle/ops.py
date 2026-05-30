@@ -1514,7 +1514,9 @@ def resolve_alias(store: GraphStore, ref: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def import_graph(store: GraphStore, document: dict[str, Any]) -> dict[str, Any]:
+def import_graph(
+    store: GraphStore, document: dict[str, Any], *, trusted: bool = False
+) -> dict[str, Any]:
     """Two-pass build of a graph fragment from a JSON document.
 
     The document shape::
@@ -1538,6 +1540,16 @@ def import_graph(store: GraphStore, document: dict[str, Any]) -> dict[str, Any]:
 
     An optional ``created_at`` per node enables deterministic re-import (the
     timestamp is part of the node id).
+
+    This is the LLM/batch on-ramp, so by default it is treated as UNTRUSTED:
+    each imported status is routed through :func:`guard_authored_status`, which
+    rejects a terminal status (``ratified``/``harvested``/``abandoned``) on the
+    same footing as a model-authored write. Otherwise a model could hand back a
+    document that imports its own conclusions as already-ratified with no
+    adversarial ruling, defeating the debate-integrity invariant on the very
+    surface meant for automated input. Pass ``trusted=True`` ONLY to round-trip
+    a graph this tool itself exported (where a terminal status really did come
+    from a settled ruling); the human/agent import paths leave it False.
     """
     if not isinstance(document, dict):
         raise ValueError("import document must be a JSON object")
@@ -1568,6 +1580,11 @@ def import_graph(store: GraphStore, document: dict[str, Any]) -> dict[str, Any]:
             if dup["duplicate"]:
                 node_id = dup["existing_id"]
             else:
+                status = spec.get("status", "active")
+                if not trusted:
+                    # Untrusted import (the default): a terminal status must come
+                    # from a settled ruling, never freehand from imported JSON.
+                    status = guard_authored_status(status, settled=False)
                 kwargs: dict[str, Any] = {
                     "node_type": node_type,
                     "title": title,
@@ -1575,7 +1592,7 @@ def import_graph(store: GraphStore, document: dict[str, Any]) -> dict[str, Any]:
                     "citations": list(spec.get("citations", [])),
                     "author": spec.get("author", "local"),
                     "confidence": spec.get("confidence", 0.5),
-                    "status": spec.get("status", "active"),
+                    "status": status,
                     "tags": list(spec.get("tags", [])),
                     "metadata": dict(spec.get("metadata", {})),
                 }

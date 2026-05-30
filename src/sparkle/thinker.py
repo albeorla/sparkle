@@ -58,22 +58,18 @@ FAMILY_CODEX = "codex"
 CLAUDE_BIN = "claude"
 CODEX_BIN = "codex"
 
-# Tools the locked-down adversarial claude thinker is hard-denied. The debate
-# roles only ever return text, so every execute / mutate / network / subagent
-# tool is blocked outright. This is the deny-list half of the lockdown; the
-# other half is --permission-mode default (so an inherited 'dontAsk' auto-approve
-# cannot run a tool headless) and --strict-mcp-config (load no MCP servers). An
-# empty --allowedTools was tried first and did NOT restrict under the user's
-# 'dontAsk' default, so the lockdown is enforced structurally here instead.
-CLAUDE_BLOCKED_TOOLS = (
-    "Bash",
-    "Edit",
-    "Write",
-    "NotebookEdit",
-    "WebFetch",
-    "WebSearch",
-    "Task",
-)
+# The locked-down adversarial claude thinker runs with NO tools at all. The
+# debate roles only ever return text, so the lockdown is deny-ALL, not a
+# deny-list: `--tools ""` disables every built-in tool (verified against Claude
+# Code 2.1.157 — the init event then reports an empty tools array). A deny-list
+# was tried first and was unsafe: blocking 7 named tools still left ~21 reachable
+# (Read/Glob/Grep the disk, Cron/RemoteTrigger schedule work, TaskCreate spawns
+# an un-sandboxed subagent), and it named the wrong subagent tool ("Task" instead
+# of "TaskCreate"). `--tools ""` removes tools from the AVAILABLE set, so it is
+# stronger than permission-gating: no settings allow-rule can re-open a tool that
+# does not exist. One tool (LSP) survives `--tools ""`, so it is denied
+# explicitly here to reach a true zero-tool session.
+CLAUDE_RESIDUAL_DENY = ("LSP",)
 
 # Per-call subprocess timeout (seconds). codex in particular runs at high
 # reasoning effort and is token-heavy, so the default is generous; both thinkers
@@ -109,14 +105,15 @@ class ClaudeCliThinker:
     it — the engine duck-types, so no shared base class and no import of the
     harness is required here.
 
-    The thinker is locked down for adversarial use: it forces a non-auto-approve
-    permission mode, loads no MCP servers, and hard-denies every
-    execute/mutate/network/subagent tool (see :data:`CLAUDE_BLOCKED_TOOLS` and
-    :meth:`_build_argv`), and it runs in a fresh, isolated working directory (a
-    throwaway tempdir, removed after the call) so it cannot read or touch this
-    repository while answering. The one-shot ``-p`` mode has no separate system
-    channel, so the engine's system prompt is folded into the prompt text. No
-    process is spawned until :meth:`think` is called.
+    The thinker is locked down for adversarial use: it disables ALL built-in
+    tools (deny-all, not a deny-list — see :data:`CLAUDE_RESIDUAL_DENY` and
+    :meth:`_build_argv`), forces a non-auto-approve permission mode, loads no MCP
+    servers, and loads only user-level settings (no project/local allow-rules),
+    and it runs in a fresh, isolated working directory (a throwaway tempdir,
+    removed after the call). With zero tools available the model can reason and
+    answer but cannot act on the machine at all. The one-shot ``-p`` mode has no
+    separate system channel, so the engine's system prompt is folded into the
+    prompt text. No process is spawned until :meth:`think` is called.
 
     :param model: the Claude model id passed to ``--model`` (defaults to Opus
         4.8, the locked Claude-side model for every role).
@@ -148,15 +145,19 @@ class ClaudeCliThinker:
     def _build_argv(self, *, system: str, prompt: str) -> list[str]:
         """Construct the exact ``claude`` argv, including the tool lockdown.
 
-        Tool lockdown (verified against Claude Code 2.1.x): force
-        ``--permission-mode default`` so the user's ``dontAsk`` auto-approve
-        default cannot run a tool in headless ``-p`` mode; ``--strict-mcp-config``
-        with no ``--mcp-config`` so NO MCP servers load (safer and faster); and
-        ``--disallowedTools`` hard-denying every execute/mutate/network/subagent
-        tool (:data:`CLAUDE_BLOCKED_TOOLS`). The model can reason and answer but
-        cannot act on the machine. Split out so the test suite can assert the
-        argv shape without spawning the CLI. ``--disallowedTools`` is variadic so
-        it MUST stay last (it consumes all trailing tokens).
+        Tool lockdown (verified against Claude Code 2.1.157): ``--tools ""``
+        disables ALL built-in tools, so the model has nothing to act with;
+        ``--disallowedTools LSP`` removes the one tool that survives ``--tools ""``
+        for a true zero-tool session; ``--permission-mode default`` keeps the
+        user's ``dontAsk`` auto-approve from running anything headless;
+        ``--strict-mcp-config`` (no ``--mcp-config``) loads NO MCP servers; and
+        ``--setting-sources user`` loads only user-level settings so a project or
+        local allow-rule cannot re-open a tool for the adversarial run. The model
+        can reason and answer but cannot act on the machine. Split out so the test
+        suite can assert the argv shape without spawning the CLI. Both ``--tools``
+        and ``--disallowedTools`` are variadic; ``--disallowedTools`` stays last,
+        and ``--tools ""`` is followed immediately by another flag so it collects
+        only the empty string.
         """
         folded = _fold_system(system, prompt)
         return [
@@ -170,8 +171,12 @@ class ClaudeCliThinker:
             "--permission-mode",
             "default",
             "--strict-mcp-config",
+            "--setting-sources",
+            "user",
+            "--tools",
+            "",
             "--disallowedTools",
-            *CLAUDE_BLOCKED_TOOLS,
+            *CLAUDE_RESIDUAL_DENY,
         ]
 
     def think(

@@ -114,9 +114,14 @@ class FamilyGateTestCase(unittest.TestCase):
 
     def _run_judge(self, claim_id: str) -> harness.MoveResult:
         """Run only the judge role agent against ``claim_id`` and return the
-        recorded MoveResult (refused or written; never raises)."""
+        recorded MoveResult (refused or written; never raises).
+
+        The verdict is the documented affirming token ('upheld') so the
+        dispatch's verdict-settle coupling honors settle — these tests probe the
+        cross-FAMILY gate, not the verdict vocabulary.
+        """
         thinker = StubThinker(
-            {"judge": _move("rule", verdict="accept", settle=True)}
+            {"judge": _move("rule", verdict="upheld", settle=True)}
         )
         agent = RoleAgent("judge", self.config, run_id="run-fam")
         prompt, context = harness._render_prompt(
