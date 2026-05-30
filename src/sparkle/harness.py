@@ -948,6 +948,32 @@ class AutonomousEngine:
             raise ValueError("seed question cannot be empty")
 
         run_id = run_id or f"run-{uuid4().hex[:12]}"
+
+        # Persist the CONFIGURED role -> family/model roster for this run so an
+        # auditor can see, after the fact, that the critic was set up on a
+        # different model family than the proposer (that config map is otherwise
+        # gone at process exit). This records CONFIG, not a runtime probe of
+        # which model answered each call — but run_cli_loop builds the thinkers
+        # from this same config, so the shipped path is faithful. The BINDING
+        # cross-family check is the judge-time gate (see ops.rule), not this
+        # record. Built from config alone; touches no node/edge payload.
+        cfg = self.config
+        roles_manifest = {
+            role: {
+                "family": cfg.backend_for_role(role),
+                "model": cfg.model_for_role(role),
+                "author": cfg.author_for_role(role),
+            }
+            for role in ("proposer", "critic", "evidence_gatherer", "judge", "synthesizer")
+        }
+        manifest = ops.write_run_manifest(
+            self.store,
+            run_id,
+            roles_manifest,
+            cross_family_ok=cfg.critic_backend != cfg.proposer_backend,
+            label_with_model=cfg.label_with_model,
+        )
+
         playbook = ops.load_playbook(self.store)
         phases = playbook.get("phases", [])
 
@@ -1098,6 +1124,7 @@ class AutonomousEngine:
             "moves": moves,
             "final_signal": final_signal,
             "summary": run_region_summary(self.store, run_id),
+            "manifest": manifest,
         }
 
     # --- frontier helpers ---------------------------------------------------

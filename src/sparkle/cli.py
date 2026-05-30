@@ -181,6 +181,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_cmd.set_defaults(_run=True)
 
+    run_manifest_cmd = subparsers.add_parser(
+        "run-manifest",
+        help="Show the role -> model-family roster recorded for a run (cross-family audit)",
+    )
+    run_manifest_cmd.add_argument("run_id", help="the run id to audit")
+
     show = subparsers.add_parser("show", help="Show a node with inbound and outbound edges")
     show.add_argument("node_id")
 
@@ -328,6 +334,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Handle: {result['claim_id'][:12]}")
         print(f"Status: {result.get('status', 'done')}")
         print(f"Moves: {len(result.get('moves', []))}")
+        manifest = result.get("manifest")
+        if manifest:
+            roles = manifest.get("roles", {})
+            prop = roles.get("proposer", {}).get("family", "?")
+            crit = roles.get("critic", {}).get("family", "?")
+            cf = "ok" if manifest.get("cross_family_ok") else "VIOLATED"
+            print(
+                f"Cross-family: {cf} (proposer={prop}, critic={crit}); "
+                f"audit with `sparkle run-manifest {result['run_id']}`"
+            )
         signal = result.get("final_signal")
         if signal is not None:
             print(f"Final signal: {signal}")
@@ -341,6 +357,20 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             result = ops.init(store)
             print(f"Initialized graph store at {result['store']}")
+            return 0
+
+        if args.command == "run-manifest":
+            manifest = ops.run_manifest(store, args.run_id)
+            print(f"Run: {manifest['run_id']}")
+            print(f"Started: {manifest.get('started_at', '?')}")
+            cf = "ok" if manifest.get("cross_family_ok") else "VIOLATED"
+            print(f"Cross-family: {cf}")
+            print("Roles (role -> family / model / author):")
+            for role, info in manifest.get("roles", {}).items():
+                print(
+                    f"  {role}: {info.get('family', '?')} / "
+                    f"{info.get('model', '?')} / author={info.get('author', '?')}"
+                )
             return 0
 
         if args.command == "bootstrap":

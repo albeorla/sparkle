@@ -50,7 +50,7 @@ from typing import Any, Iterator
 
 from .bootstrap import seed_concept_graph
 from .graph import GraphStore
-from .models import DEFAULT_EDGE_RELATIONS, Edge, Node, NodeStatus, NodeType
+from .models import DEFAULT_EDGE_RELATIONS, Edge, Node, NodeStatus, NodeType, utc_now_iso
 from .templates import BRANCH_TEMPLATES, build_branch_node
 from . import presentation
 
@@ -1441,7 +1441,75 @@ def frontier(
 
 
 # ---------------------------------------------------------------------------
-# 7. Alias sidecar over .sparkle/aliases.json (never in any hashed payload)
+# 7. Run manifest — the per-run CONFIGURED role -> model-family roster
+# ---------------------------------------------------------------------------
+# The binding cross-family guarantee (a ratification needs an objection from a
+# different model family than the proposer) is ENFORCED live at ruling time by
+# the judge-time gate, and the contradicts edges that gate read are in the
+# graph. What is NOT otherwise on disk is the role -> family/model setup the run
+# was CONFIGURED with — that map lives only in the in-memory HarnessConfig and
+# is gone at process exit. The manifest persists that configured roster so an
+# auditor can see, after the fact, that the critic was configured on a different
+# family than the proposer. It records CONFIG, not a runtime probe of which
+# model actually answered each call (in the shipped CLI path the thinkers are
+# built from this same config, so it is faithful; see harness.run_cli_loop). It
+# is stored under a top-level ``runs`` key INSIDE the graph store, OUTSIDE every
+# hashed node/edge payload, so writing it leaves all content-addressed ids
+# untouched (the store's ``_read``/``_write`` pass extra top-level keys through
+# verbatim).
+
+
+def write_run_manifest(
+    store: GraphStore,
+    run_id: str,
+    roles: dict[str, dict[str, str]],
+    *,
+    cross_family_ok: bool,
+    label_with_model: bool,
+) -> dict[str, Any]:
+    """Persist the CONFIGURED role -> {family, model, author} roster for a run.
+
+    Rides the same advisory lock and read-modify-write path as every other
+    store mutation, but touches no node/edge payload, so node ids are stable.
+    ``roles`` and ``cross_family_ok`` describe the run's CONFIGURATION, not a
+    runtime measurement of which model answered each call. ``cross_family_ok``
+    is whether the configured critic family differs from the proposer family;
+    note the engine's HarnessConfig refuses to construct otherwise, so for any
+    engine-produced run it is True — the field is a convenience restatement of
+    that config precondition, NOT the judge-time gate's per-ratification result
+    (that binding check lives in ``rule``/``_distinct_adversary_objection`` and
+    is recorded as the decision nodes and contradicts edges in the graph).
+    """
+    if not (isinstance(run_id, str) and run_id.strip()):
+        raise ValueError("run_id cannot be empty")
+    record = {
+        "run_id": run_id,
+        "started_at": utc_now_iso(),
+        "roles": roles,
+        "cross_family_ok": bool(cross_family_ok),
+        "label_with_model": bool(label_with_model),
+    }
+    with graph_lock(store):
+        data = store._read()
+        data.setdefault("runs", {})[run_id] = record
+        store._write(data)
+    return record
+
+
+def run_manifest(store: GraphStore, run_id: str) -> dict[str, Any]:
+    """Read back the role -> model-family roster recorded for ``run_id``.
+
+    Raises ``ValueError`` if no manifest was written for that run (a debate from
+    before manifests existed, or an unknown run id).
+    """
+    record = store._read().get("runs", {}).get(run_id)
+    if record is None:
+        raise ValueError(f"no run manifest for run_id: {run_id}")
+    return record
+
+
+# ---------------------------------------------------------------------------
+# 8. Alias sidecar over .sparkle/aliases.json (never in any hashed payload)
 # ---------------------------------------------------------------------------
 
 

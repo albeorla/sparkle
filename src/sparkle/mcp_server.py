@@ -523,6 +523,21 @@ def build_app() -> FastMCP:
         """Run diff as a tool (mirror of ``sparkle://run/{run_id}/diff``)."""
         return _run_diff(run_id)
 
+    @mcp.resource("sparkle://run/{run_id}/manifest")
+    def run_manifest_resource(run_id: str) -> dict[str, Any]:
+        """The role -> model-family roster a run recorded (cross-family audit).
+
+        Proves which model family backed each role and whether the locked
+        critic-differs-from-proposer invariant held. Raises if the run wrote no
+        manifest (a debate from before manifests existed, or an unknown id).
+        """
+        return ops.run_manifest(_store(), run_id)
+
+    @mcp.tool()
+    def sparkle_run_manifest(run_id: str) -> dict[str, Any]:
+        """Run manifest as a tool (mirror of ``sparkle://run/{run_id}/manifest``)."""
+        return ops.run_manifest(_store(), run_id)
+
     @mcp.tool()
     async def sparkle_ratify_region(
         run_id: str,

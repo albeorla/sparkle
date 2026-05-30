@@ -816,6 +816,87 @@ class ErrorPathTests(RunTestBase):
 
 
 # ===========================================================================
+# 6b. RUN MANIFEST: the per-run role -> model-family roster (cross-family audit)
+# ===========================================================================
+
+
+class RunManifestTests(RunTestBase):
+    """The manifest is the persisted PROOF of which model family backed each
+    role. It rides a top-level ``runs`` key inside the store, outside every
+    hashed node/edge payload, so writing it must never perturb a node id.
+    """
+
+    _ROLES = {
+        "proposer": {"family": "claude", "model": "claude-opus-4-8", "author": "proposer"},
+        "critic": {"family": "codex", "model": "gpt-5.5", "author": "critic"},
+    }
+
+    def test_write_then_read_round_trips_the_roster(self) -> None:
+        ops.write_run_manifest(
+            self.store, "run-x", self._ROLES, cross_family_ok=True, label_with_model=False
+        )
+        got = ops.run_manifest(self.store, "run-x")
+        self.assertEqual(got["run_id"], "run-x")
+        self.assertEqual(got["roles"], self._ROLES)
+        self.assertTrue(got["cross_family_ok"])
+        self.assertFalse(got["label_with_model"])
+        self.assertIn("started_at", got)
+
+    def test_manifest_survives_node_writes_and_leaves_ids_untouched(self) -> None:
+        # A node written BEFORE the manifest keeps its content-addressed id
+        # after a manifest write, and the manifest is still readable after MORE
+        # node writes land (the top-level 'runs' key rides read-modify-write).
+        claim = self.add_run_node(run_id="run-y", title="Claim", content="body")
+        before_id = claim["node_id"]
+
+        ops.write_run_manifest(
+            self.store, "run-y", self._ROLES, cross_family_ok=True, label_with_model=False
+        )
+        # The earlier node is untouched (same id resolves to the same node).
+        self.assertEqual(self.store.get_node(before_id)["title"], "Claim")
+
+        # Write another node AFTER the manifest; the manifest still reads back.
+        self.add_run_node(
+            run_id="run-y", node_type="evidence", title="Ev", content="datum"
+        )
+        self.assertEqual(self.store.get_node(before_id)["title"], "Claim")
+        self.assertEqual(ops.run_manifest(self.store, "run-y")["roles"], self._ROLES)
+
+    def test_manifest_survives_a_ruling_supersession_rewrite(self) -> None:
+        # ops.rule(settle=True) supersedes the claim with a ratified version
+        # (a new node plus rehomed edges) — the heaviest store-mutation path,
+        # not a plain add_node. The manifest must survive that rewrite too.
+        claim = self.add_run_node(run_id="run-z", title="Claim", content="debated")
+        ops.add_branch(
+            self.store,
+            from_ref=claim["node_id"],
+            template="objection",
+            title="Obj",
+            content="no",
+            author="critic",
+            model_authored=True,
+        )
+        ops.write_run_manifest(
+            self.store, "run-z", self._ROLES, cross_family_ok=True, label_with_model=False
+        )
+        ruling = ops.rule(
+            self.store, claim["node_id"], verdict="accept", settle=True, author="judge"
+        )
+        self.assertTrue(ruling["settled"])
+        self.assertEqual(ops.run_manifest(self.store, "run-z")["roles"], self._ROLES)
+
+    def test_run_manifest_unknown_run_raises_value_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"no run manifest for run_id"):
+            ops.run_manifest(self.store, "ghost")
+
+    def test_write_manifest_rejects_empty_run_id(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"run_id cannot be empty"):
+            ops.write_run_manifest(
+                self.store, "  ", {}, cross_family_ok=True, label_with_model=False
+            )
+
+
+# ===========================================================================
 # 7. SDK-GATED: the REAL MCP run closures, end-to-end (skips without the extra)
 # ===========================================================================
 
@@ -878,10 +959,30 @@ class McpRunClosureTests(unittest.TestCase):
         for required in (
             "sparkle_run_summary",
             "sparkle_run_diff",
+            "sparkle_run_manifest",
             "sparkle_ratify_region",
             "sparkle_rollback_run",
         ):
             self.assertIn(required, names)
+
+    def test_run_manifest_tool_reads_back_the_roster(self) -> None:
+        # The engine writes manifests; here we write one through ops on the
+        # server's store, then prove the real tool closure reads it back.
+        ops.write_run_manifest(
+            self.mcp_server._STORE,
+            "mcpmanifest",
+            {"proposer": {"family": "claude", "model": "claude-opus-4-8", "author": "proposer"},
+             "critic": {"family": "codex", "model": "gpt-5.5", "author": "critic"}},
+            cross_family_ok=True,
+            label_with_model=False,
+        )
+        manifest = self._call("sparkle_run_manifest", run_id="mcpmanifest")
+        self.assertEqual(manifest["run_id"], "mcpmanifest")
+        self.assertTrue(manifest["cross_family_ok"])
+        self.assertNotEqual(
+            manifest["roles"]["proposer"]["family"],
+            manifest["roles"]["critic"]["family"],
+        )
 
     def test_run_summary_and_diff_report_the_runs_region(self) -> None:
         self._call(

@@ -263,6 +263,53 @@ class HarnessEngineTestCase(unittest.TestCase):
         self.assertEqual(empty["node_count"], 0)
         self.assertEqual(empty["edge_count"], 0)
 
+    def test_run_persists_a_cross_family_manifest(self) -> None:
+        """The run records WHICH model family backed each role, so the cross-
+        family guarantee is provable from the saved graph after the process
+        exits — not just trusted from the in-memory config."""
+        thinker = StubThinker(_happy_script())
+        engine = AutonomousEngine(self.store, thinker, self._config())
+        result = engine.run("Does music help coding?", run_id="run-manifest")
+
+        # Surfaced in the run result AND persisted for after-the-fact audit.
+        self.assertEqual(result["manifest"]["run_id"], "run-manifest")
+        manifest = ops.run_manifest(self.store, "run-manifest")
+        self.assertEqual(manifest, result["manifest"])
+
+        # All five roles are rostered with family + model + author.
+        roles = manifest["roles"]
+        self.assertEqual(
+            set(roles),
+            {"proposer", "critic", "evidence_gatherer", "judge", "synthesizer"},
+        )
+        # The cross-family invariant held and is recorded: the critic ran a
+        # DIFFERENT model family than the proposer (codex vs claude).
+        self.assertTrue(manifest["cross_family_ok"])
+        self.assertNotEqual(roles["proposer"]["family"], roles["critic"]["family"])
+        self.assertEqual(roles["critic"]["family"], "codex")
+        self.assertEqual(roles["proposer"]["family"], "claude")
+        # The recorded model strings match the config the run actually used.
+        self.assertEqual(roles["critic"]["model"], "model-critic")
+
+    def test_manifest_records_configured_families_not_the_thinker_that_ran(self) -> None:
+        """Honest limitation, pinned: the manifest reflects the CONFIGURED
+        role->family roster, not a runtime probe of which thinker answered.
+
+        Here a SINGLE stub backend runs every role, yet the manifest records the
+        config's families (critic=codex). This is faithful in production because
+        run_cli_loop builds the real per-role thinkers from this same config; the
+        decoupling is only reachable via the test/injection seam. If this ever
+        flips to the live thinker's family, update the 'records config' docstrings
+        on ops.write_run_manifest and the harness manifest comment.
+        """
+        thinker = StubThinker(_happy_script())
+        engine = AutonomousEngine(self.store, thinker, self._config())
+        engine.run("Does music help coding?", run_id="run-cfg")
+
+        manifest = ops.run_manifest(self.store, "run-cfg")
+        self.assertEqual(manifest["roles"]["critic"]["family"], "codex")
+        self.assertEqual(manifest["roles"]["proposer"]["family"], "claude")
+
     # -- (2) The judge's ratification REQUIRED the cross-author challenge ---
 
     def test_self_strawman_objection_does_not_ratify(self) -> None:
