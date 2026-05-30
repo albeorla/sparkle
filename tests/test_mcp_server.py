@@ -603,6 +603,29 @@ class McpServerTestCase(unittest.TestCase):
         # The shared vocabulary block is appended to every prompt.
         self.assertIn("Node types you may create", text)
 
+    def test_investigate_prompt_carries_web_sourcing_methodology(self) -> None:
+        # The built-in evidence prompt must guide the agent to web-VERIFY real
+        # sources, quote them, and mark unverifiable figures -- so the MCP
+        # research path inherits the CLI harness's sourcing discipline rather
+        # than depending on a hand-crafted ad-hoc instruction.
+        text = _run(self.app.get_prompt("investigate", {"node_ref": "abc123"})).messages[0].content.text
+        low = text.lower()
+        self.assertIn("web search", low)
+        self.assertIn("quote", low)
+        self.assertIn("retrieved", low)
+        self.assertIn("(recalled, unverified)", text)
+
+    def test_synthesize_prompt_carries_judge_and_synth_honesty(self) -> None:
+        # The built-in judge/synthesizer prompt must carry the credit-URL-backed,
+        # discount-unverifiable, settle-only-if-upheld, and source-aware-synthesis
+        # methodology.
+        text = _run(self.app.get_prompt("synthesize", {"claim_ref": "abc123"})).messages[0].content.text
+        low = text.lower()
+        self.assertIn("unverified recall unless", low)
+        self.assertIn("source-backed", low)
+        self.assertIn("uphold the claim as stated", low)
+        self.assertIn("different author", low)
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
