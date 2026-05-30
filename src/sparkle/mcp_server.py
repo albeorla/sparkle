@@ -286,6 +286,13 @@ def build_app() -> FastMCP:
         it writes a ``decision`` node; with ``settle=True`` it also writes a
         SUPERSEDING claim version carrying status ``ratified`` (never an in-place
         mutation — nodes are frozen).
+
+        ``require_distinct_adversary=True``: the MCP server is an AGENT-driven
+        front-end (autonomous operation), so it gets the same author-distinct
+        floor as the autonomous harness — a claim only counts as challenged if an
+        objection comes from a DIFFERENT author than the claim, so a single agent
+        cannot ratify its own claim off a self-written strawman. (The trusted
+        human ``sparkle rule`` CLI path leaves this off.)
         """
         result = ops.rule(
             _store(),
@@ -296,6 +303,7 @@ def build_app() -> FastMCP:
             author="judge",
             confidence=confidence,
             run_id=run_id,
+            require_distinct_adversary=True,
         )
         await _notify_changed(ctx)
         return result

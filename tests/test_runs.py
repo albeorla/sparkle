@@ -1042,6 +1042,67 @@ class McpRunClosureTests(unittest.TestCase):
                 run_id="r",
             )
 
+    def test_mcp_rule_refuses_a_self_strawman_ratification(self):
+        # The agent-driven MCP path enforces the author-distinct floor (it passes
+        # require_distinct_adversary=True, like the autonomous harness): a claim
+        # objected to ONLY by its own author cannot be ruled/ratified, so a single
+        # autonomous agent cannot self-strawman its way to a settled claim.
+        claim = self._call(
+            "sparkle_add_node",
+            node_type="claim",
+            title="Self-authored claim",
+            content="the proposer's own claim",
+            run_id="ssr",
+            agent_role="proposer",
+        )
+        # Same-author objection: the proposer objecting to its OWN claim.
+        self._call(
+            "sparkle_branch",
+            from_ref=claim["node_id"],
+            template="objection",
+            title="A strawman I wrote myself",
+            content="a self-authored objection",
+            run_id="ssr",
+            agent_role="proposer",
+        )
+        with self.assertRaisesRegex(ValueError, r"own author"):
+            self._call(
+                "sparkle_rule",
+                claim_ref=claim["node_id"],
+                verdict="upheld",
+                settle=True,
+                run_id="ssr",
+            )
+
+    def test_mcp_rule_allows_a_cross_author_ruling(self):
+        # The positive case: a genuine objection from a DIFFERENT author unlocks
+        # the ruling, so the distinct-adversary floor does not block real debate.
+        claim = self._call(
+            "sparkle_add_node",
+            node_type="claim",
+            title="Cross-author claim",
+            content="the proposer's claim",
+            run_id="xa",
+            agent_role="proposer",
+        )
+        self._call(
+            "sparkle_branch",
+            from_ref=claim["node_id"],
+            template="objection",
+            title="Critic objection",
+            content="a real objection from a different author",
+            run_id="xa",
+            agent_role="critic",
+        )
+        result = self._call(
+            "sparkle_rule",
+            claim_ref=claim["node_id"],
+            verdict="upheld",
+            settle=True,
+            run_id="xa",
+        )
+        self.assertIn("decision", result)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,7 @@
 
 What this proves (not just registration):
   * ``build_app()`` returns a FastMCP named "sparkle" exposing the full surface:
-    16 tools, 4 resources, 5 resource templates, 4 prompts.
+    17 tools, 4 resources, 6 resource templates, 4 prompts.
   * A representative slice of tool *callables* drives a real debate against a
     temp graph end-to-end: add a claim -> attack it (branch/link) -> read the
     live referee signal -> rule. The SAME hard invariant that lives in
@@ -108,15 +108,17 @@ class McpServerTestCase(unittest.TestCase):
         self.assertIsInstance(self.app, FastMCP)
         self.assertEqual(self.app.name, "sparkle")
 
-    def test_surface_counts_16_tools_4_resources_5_templates_4_prompts(self) -> None:
+    def test_surface_counts_17_tools_4_resources_6_templates_4_prompts(self) -> None:
         tools = _run(self.app.list_tools())
         resources = _run(self.app.list_resources())
         templates = _run(self.app.list_resource_templates())
         prompts = _run(self.app.list_prompts())
 
-        self.assertEqual(len(tools), 16, [t.name for t in tools])
+        # 17 tools / 6 templates include the run-manifest cross-family audit
+        # surface (sparkle_run_manifest + sparkle://run/{run_id}/manifest).
+        self.assertEqual(len(tools), 17, [t.name for t in tools])
         self.assertEqual(len(resources), 4, [str(r.uri) for r in resources])
-        self.assertEqual(len(templates), 5, [t.uriTemplate for t in templates])
+        self.assertEqual(len(templates), 6, [t.uriTemplate for t in templates])
         self.assertEqual(len(prompts), 4, [p.name for p in prompts])
 
     def test_every_promised_tool_is_registered_by_name(self) -> None:
@@ -136,6 +138,7 @@ class McpServerTestCase(unittest.TestCase):
             "sparkle_signal",
             "sparkle_run_summary",
             "sparkle_run_diff",
+            "sparkle_run_manifest",
             "sparkle_ratify_region",
             "sparkle_rollback_run",
         }
@@ -161,6 +164,7 @@ class McpServerTestCase(unittest.TestCase):
                 "sparkle://subgraph/{ref}",
                 "sparkle://run/{run_id}/summary",
                 "sparkle://run/{run_id}/diff",
+                "sparkle://run/{run_id}/manifest",
             },
         )
         prompt_names = {p.name for p in _run(self.app.list_prompts())}
