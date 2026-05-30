@@ -410,13 +410,14 @@ _JUDGE_HONESTY = (
 # understated the evidence to the end user -- a verified real-run failure mode.
 _SOURCE_AWARE_HONESTY = (
     " Distinguish source-backed figures from recalled ones. A specific figure, "
-    "statistic, study, or citation that the evidence gatherer backed with a "
-    "RETRIEVED SOURCE URL is source-backed: present it as such, with its source, "
-    "NOT as '(recalled, unverified)'. Mark a figure '(recalled, unverified)' ONLY "
-    "when it has no retrieved source. Do NOT stamp the whole synthesis as "
-    "unverified when retrieved sources exist. (A retrieved URL means the gatherer "
-    "fetched that source; describe figures as backed by it, not independently "
-    "verified by you.)"
+    "statistic, study, or citation that is backed by a RETRIEVED SOURCE URL is "
+    "source-backed: present it as such, with its source, NOT as "
+    "'(recalled, unverified)'. Mark a figure '(recalled, unverified)' ONLY when no "
+    "retrieved source exists for it. Do NOT stamp the whole answer as unverified "
+    "when retrieved sources exist. (A retrieved source URL means that source was "
+    "fetched; describe figures as backed by it, not independently verified by "
+    "you.) State each figure and conclusion DIRECTLY, with its source where one "
+    "exists; do not narrate how the answer was reached."
 )
 
 # The evidence gatherer (and ONLY it) has real web search/fetch, so its mandate
@@ -539,10 +540,17 @@ ROLE_SYSTEM: dict[str, str] = {
         + _JUDGE_HONESTY
     ),
     "synthesizer": (
-        "You are the SYNTHESIZER. Harvest the settled debate into one synthesis "
-        "node. Return a single JSON object and nothing else:\n"
+        "Produce ONE clear, standalone answer to the seed question, written for a "
+        "decision-maker who will act on it. LEAD with the bottom-line answer in "
+        "the first sentence, then give the key support, then the main caveat or "
+        "uncertainty. State conclusions DIRECTLY. The answer must stand on its own: "
+        "do NOT reference the analysis process or any role that produced it. Never "
+        "say a verdict was upheld or ruled, that an objection was raised or "
+        "survives, that anything was shown by deliberation, or that a point was "
+        "settled -- just state what is true and why. Return a single JSON object "
+        "and nothing else:\n"
         '  {"move":"harvest","target":"<claim handle>",'
-        '"title":"<short synthesis title>","content":"<the takeaway>"}\n'
+        '"title":"<short synthesis title>","content":"<the answer>"}\n'
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
         + _SOURCE_AWARE_HONESTY
     ),

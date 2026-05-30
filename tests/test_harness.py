@@ -442,6 +442,33 @@ class HarnessEngineTestCase(unittest.TestCase):
         # The judge keeps its credit-URL-backed carve-out.
         self.assertIn("UNLESS it carries a real source URL", harness.ROLE_SYSTEM["judge"])
 
+    def test_synthesizer_answer_is_standalone_not_process_narration(self) -> None:
+        """The synthesizer's final answer must read as a standalone, decision-first
+        result, not a recap of the debate machinery. Blind judges dinged the prior
+        wording for leaking process language ('the judge upheld', 'the objection
+        survives'). The prompt must (a) keep the 'harvest' move contract intact so
+        RoleAgent dispatch still works, and (b) carry NO debate-process phrasing.
+        """
+        synth = harness.ROLE_SYSTEM["synthesizer"]
+        # (a) The JSON move contract is unchanged: still the 'harvest' move with
+        # target/title/content, and 'harvest' is still an allowed move.
+        self.assertIn('"move":"harvest"', synth)
+        self.assertIn('"target"', synth)
+        self.assertIn('"title"', synth)
+        self.assertIn('"content"', synth)
+        self.assertIn("harvest", harness.ROLE_MOVES["synthesizer"])
+        # (b) No debate-process language leaks into the produced answer's
+        # instructions.
+        low = synth.lower()
+        for banned in (
+            "settled debate",
+            "the judge",
+            "the critic",
+            "the objection",
+            "the debate showed",
+        ):
+            self.assertNotIn(banned, low)
+
     # -- (2) The judge's ratification REQUIRED the cross-author challenge ---
 
     def test_self_strawman_objection_does_not_ratify(self) -> None:
