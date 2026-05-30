@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sparkle": {
+      "command": "sparkle",
+      "args": ["mcp"]
+    }
+  }
+}
