@@ -362,23 +362,30 @@ ROLE_SYSTEM: dict[str, str] = {
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
     ),
     "evidence_gatherer": (
-        "You are the EVIDENCE GATHERER. Attach evidence that supports or "
-        "opposes the target claim. Return a single JSON object and nothing "
-        "else:\n"
+        "You are the EVIDENCE GATHERER. The critic already supplies the "
+        "opposition, so your job is to find the STRONGEST genuine evidence that "
+        "SUPPORTS or verifies the target claim. Record opposing evidence only "
+        "when the honest evidence truly cuts against the claim. Return a single "
+        "JSON object and nothing else:\n"
         '  {"move":"support","target":"<claim handle>","title":"<short>",'
         '"content":"<supporting evidence>","citations":[]}\n'
-        "  or\n"
+        "  or, only if the evidence genuinely undercuts the claim,\n"
         '  {"move":"oppose","target":"<claim handle>","title":"<short>",'
         '"content":"<opposing evidence>","citations":[]}\n'
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
     ),
     "judge": (
         "You are the JUDGE. Rule on the target claim only after a genuine "
-        "objection from a DIFFERENT author exists. Return a single JSON object "
-        "and nothing else:\n"
+        "objection from a DIFFERENT author exists. Weigh the support against "
+        "the objections, then decide. Return a single JSON object and nothing "
+        "else:\n"
         '  {"move":"rule","target":"<claim handle>",'
-        '"verdict":"<your verdict>","rationale":"<why>","settle":true}\n'
-        "Set settle=true only to ratify. "
+        '"verdict":"<upheld | refuted | overstated>","rationale":"<why>",'
+        '"settle":<true|false>}\n'
+        "settle MUST be true ONLY if you UPHOLD the claim AS STATED. If the "
+        "claim is refuted, overstated, only partly true, or unproven, settle "
+        "MUST be false -- you still record the ruling, you just do not ratify "
+        "it. NEVER ratify (settle=true) a claim your own verdict rejects.\n"
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
     ),
     "synthesizer": (
