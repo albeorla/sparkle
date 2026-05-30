@@ -368,7 +368,27 @@ _JUDGE_HONESTY = (
     "gatherer retrieved. Do NOT let an unverifiable specific be the deciding "
     "evidence -- discount it and rule on reasoning that holds without trusting an "
     "unverifiable number. If the support rests mainly on recalled specifics with "
-    "no real citation, the claim is unproven, so settle=false."
+    "no real citation, the claim is unproven, so settle=false. A URL-backed figure "
+    "is SOURCE-BACKED (the gatherer retrieved that source), not independently "
+    "verified by you -- credit it as backed by its retrieved source, do not call "
+    "it 'web-verified'."
+)
+
+# For roles that SEE the evidence gatherer's retrieved-source URLs in their
+# context (judge, synthesizer): a figure backed by a retrieved source is
+# source-backed, NOT unverified recall. Only figures with no retrieved source are
+# recalled. Without this, the synthesizer (which now receives the retrieved URLs
+# too) wrongly stamped web-sourced figures '(recalled, unverified)' and
+# understated the evidence to the end user -- a verified real-run failure mode.
+_SOURCE_AWARE_HONESTY = (
+    " Distinguish source-backed figures from recalled ones. A specific figure, "
+    "statistic, study, or citation that the evidence gatherer backed with a "
+    "RETRIEVED SOURCE URL is source-backed: present it as such, with its source, "
+    "NOT as '(recalled, unverified)'. Mark a figure '(recalled, unverified)' ONLY "
+    "when it has no retrieved source. Do NOT stamp the whole synthesis as "
+    "unverified when retrieved sources exist. (A retrieved URL means the gatherer "
+    "fetched that source; describe figures as backed by it, not independently "
+    "verified by you.)"
 )
 
 # The evidence gatherer (and ONLY it) has real web search/fetch, so its mandate
@@ -443,9 +463,7 @@ ROLE_SYSTEM: dict[str, str] = {
         '  {"move":"harvest","target":"<claim handle>",'
         '"title":"<short synthesis title>","content":"<the takeaway>"}\n'
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
-        + _RECALL_HONESTY
-        + " Carry the unverified status of any recalled figure into the synthesis;"
-        " never present a recalled specific as a settled fact."
+        + _SOURCE_AWARE_HONESTY
     ),
 }
 

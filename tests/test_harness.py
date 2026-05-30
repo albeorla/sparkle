@@ -340,6 +340,22 @@ class HarnessEngineTestCase(unittest.TestCase):
         self.assertIn("A 2022 RCT found X.", prompt)
         self.assertIn("why it might be wrong", prompt)
 
+    def test_synthesizer_is_source_aware_not_blind_recall(self) -> None:
+        """The synthesizer SEES the evidence gatherer's retrieved URLs (via
+        _render_prompt), so it must credit source-backed figures rather than stamp
+        everything '(recalled, unverified)'. Regression for a real-run gap where
+        the synthesis called web-sourced figures unverified, contradicting the
+        judge's 'real sources' ruling.
+        """
+        synth = harness.ROLE_SYSTEM["synthesizer"]
+        self.assertIn("source-backed", synth)
+        self.assertIn("retrieved source", synth.lower())
+        # The blind 'no way to look anything up' clause is wrong for the
+        # synthesizer's context and must not be appended to it.
+        self.assertNotIn("You have NO way to look anything up", synth)
+        # The judge keeps its credit-URL-backed carve-out.
+        self.assertIn("UNLESS it carries a real source URL", harness.ROLE_SYSTEM["judge"])
+
     # -- (2) The judge's ratification REQUIRED the cross-author challenge ---
 
     def test_self_strawman_objection_does_not_ratify(self) -> None:
