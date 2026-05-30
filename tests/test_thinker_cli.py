@@ -13,8 +13,10 @@ exercised the same key-free way.
 What we lock down:
 
 - The Claude backend's command line names Opus 4.8 (``--model claude-opus-4-8``),
-  asks for JSON output (``--output-format json``), grants the model NO tools
-  (the empty ``--allowedTools`` lockdown) and runs in a throwaway working
+  asks for JSON output (``--output-format json``), and locks the model down
+  (``--permission-mode default`` so an inherited ``dontAsk`` cannot auto-run a
+  tool, ``--strict-mcp-config`` so no MCP servers load, and ``--disallowedTools``
+  denying every execute/mutate/network tool) and runs in a throwaway working
   directory so it cannot read this repo; it parses the JSON event array stdout,
   pulls the answer out of the ``result`` element, accumulates token usage, and
   raises a clear error on an error-flagged result, a non-zero exit, a timeout, or
@@ -175,16 +177,28 @@ class ClaudeArgvTests(unittest.TestCase):
         # JSON output so stdout is the parseable event array.
         self.assertEqual(_arg_after(argv, "--output-format"), "json")
 
-    def test_argv_includes_empty_allowed_tools_lockdown(self):
-        # The model may answer but is granted NO tools, so it cannot touch the
-        # repo at real-run time. A wrong/missing flag here is a manual-acceptance
-        # risk (tests never spawn the real CLI), so we pin it explicitly.
+    def test_argv_locks_down_permissions_mcp_and_tools(self):
+        # The model may reason and answer but is structurally prevented from
+        # acting: permission mode forced to 'default' (so the user's 'dontAsk'
+        # auto-approve cannot run a tool headless), NO MCP servers loaded, and
+        # every execute/mutate/network tool hard-denied. A wrong/missing flag
+        # here is a manual-acceptance risk (tests never spawn the real CLI), so
+        # we pin it explicitly.
         runner = RecordingRunner(stdout=_claude_result_payload("hi"))
         ClaudeCliThinker(runner=runner).think(role="proposer", system="", prompt="p")
 
         argv = runner.last_argv
-        self.assertIn("--allowedTools", argv)
-        self.assertEqual(_arg_after(argv, "--allowedTools"), "")
+        self.assertEqual(_arg_after(argv, "--permission-mode"), "default")
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertIn("--disallowedTools", argv)
+        for tool in ("Bash", "Write", "Edit", "WebFetch", "WebSearch", "Task"):
+            self.assertIn(tool, argv)
+        # The old empty --allowedTools form did NOT restrict under the user's
+        # 'dontAsk' default, so it must be gone.
+        self.assertNotIn("--allowedTools", argv)
+        # --disallowedTools is variadic, so it must be the final flag (it
+        # consumes every trailing token).
+        self.assertEqual(argv[argv.index("--disallowedTools") - 1], "--strict-mcp-config")
 
     def test_argv_honors_a_custom_model(self):
         runner = RecordingRunner(stdout=_claude_result_payload("hi"))
