@@ -210,6 +210,46 @@ class ClaudeArgvTests(unittest.TestCase):
         # consumes every trailing token).
         self.assertEqual(argv.index("--disallowedTools"), len(argv) - 2)
 
+    def test_argv_web_search_role_gets_only_web_tools(self):
+        # The evidence gatherer (web_search=True) is the ONE exception to
+        # deny-all: it gets WebSearch/WebFetch and ONLY those, via two flags doing
+        # different jobs (verified live against Claude Code 2.1.157): --tools
+        # restricts AVAILABILITY to the web pair, --allowedTools PRE-APPROVES them
+        # so they run under --permission-mode default. Nothing dangerous (Bash /
+        # Write / Task / ToolSearch / MCP) becomes reachable.
+        runner = RecordingRunner(stdout=_claude_result_payload("hi"))
+        ClaudeCliThinker(runner=runner, web_search=True).think(
+            role="evidence_gatherer", system="", prompt="p"
+        )
+        argv = runner.last_argv
+        # Availability is the web pair, NOT deny-all "".
+        self.assertNotEqual(_arg_after(argv, "--tools"), "")
+        # WebSearch and WebFetch each appear twice: available (--tools) AND
+        # pre-approved (--allowedTools).
+        self.assertIn("--allowedTools", argv)
+        self.assertEqual(argv.count("WebSearch"), 2)
+        self.assertEqual(argv.count("WebFetch"), 2)
+        # Still no dangerous tools, and LSP still denied as the final flag.
+        for tool in ("Bash", "Write", "Edit", "Task", "ToolSearch"):
+            self.assertNotIn(tool, argv)
+        self.assertEqual(argv.index("--disallowedTools"), len(argv) - 2)
+        self.assertIn("LSP", argv)
+        # The rest of the lockdown floor is unchanged.
+        self.assertEqual(_arg_after(argv, "--permission-mode"), "default")
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertEqual(_arg_after(argv, "--setting-sources"), "user")
+
+    def test_default_thinker_has_no_web_tools(self):
+        # web_search defaults off: a normal role stays deny-all, no web tools.
+        runner = RecordingRunner(stdout=_claude_result_payload("hi"))
+        t = ClaudeCliThinker(runner=runner)
+        self.assertFalse(t.web_search)
+        t.think(role="proposer", system="", prompt="p")
+        argv = runner.last_argv
+        self.assertEqual(_arg_after(argv, "--tools"), "")
+        self.assertNotIn("--allowedTools", argv)
+        self.assertNotIn("WebSearch", argv)
+
     def test_argv_honors_a_custom_model(self):
         runner = RecordingRunner(stdout=_claude_result_payload("hi"))
         ClaudeCliThinker("claude-some-other", runner=runner).think(
@@ -572,6 +612,25 @@ class FactoryTests(unittest.TestCase):
         thinkers = build_role_thinkers(cfg)
         self.assertIsNot(thinkers["proposer"], thinkers["judge"])
         self.assertIsNot(thinkers["proposer"], thinkers["synthesizer"])
+
+    def test_evidence_gatherer_gets_web_search_others_do_not(self):
+        # The evidence gatherer is the one role that can verify sources, so it
+        # alone is built web-enabled; every other Claude role stays deny-all.
+        cfg = _FakeConfig(_LOCKED_BACKENDS, _LOCKED_MODELS)
+        thinkers = build_role_thinkers(cfg)
+        self.assertTrue(thinkers["evidence_gatherer"].web_search)
+        self.assertFalse(thinkers["proposer"].web_search)
+        self.assertFalse(thinkers["judge"].web_search)
+        self.assertFalse(thinkers["synthesizer"].web_search)
+
+    def test_evidence_web_search_can_be_disabled_via_config(self):
+        # The off-switch: config.evidence_web_search = False reverts the evidence
+        # role to deny-all (the prompt's 'if a search fails, mark unverified'
+        # fallback then keeps it honest).
+        cfg = _FakeConfig(_LOCKED_BACKENDS, _LOCKED_MODELS)
+        cfg.evidence_web_search = False
+        thinkers = build_role_thinkers(cfg)
+        self.assertFalse(thinkers["evidence_gatherer"].web_search)
 
     def test_threads_reasoning_effort_to_codex_critic(self):
         cfg = _FakeConfig(_LOCKED_BACKENDS, _LOCKED_MODELS, reasoning_effort="high")

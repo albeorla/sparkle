@@ -71,6 +71,17 @@ CODEX_BIN = "codex"
 # explicitly here to reach a true zero-tool session.
 CLAUDE_RESIDUAL_DENY = ("LSP",)
 
+# The ONE exception to deny-all: the evidence-gatherer role may be given real web
+# access so it can VERIFY sources instead of reciting figures from memory (a
+# tool-denied model fabricates precise citations with false confidence — a
+# verified failure mode). Web access takes BOTH flags, doing different jobs
+# (verified live against Claude Code 2.1.157): `--tools WebSearch WebFetch`
+# restricts the AVAILABLE built-in set to exactly these two (plus the LSP
+# survivor) so nothing dangerous (Bash/Write/Task/ToolSearch/MCP) is even
+# reachable, and `--allowedTools WebSearch WebFetch` PRE-APPROVES them so they
+# run headlessly (otherwise `--permission-mode default` blocks them at the gate).
+CLAUDE_WEB_TOOLS = ("WebSearch", "WebFetch")
+
 # Per-call subprocess timeout (seconds). codex in particular runs at high
 # reasoning effort and is token-heavy, so the default is generous; both thinkers
 # expose it as a constructor knob.
@@ -111,9 +122,13 @@ class ClaudeCliThinker:
     servers, and loads only user-level settings (no project/local allow-rules),
     and it runs in a fresh, isolated working directory (a throwaway tempdir,
     removed after the call). With zero tools available the model can reason and
-    answer but cannot act on the machine at all. The one-shot ``-p`` mode has no
-    separate system channel, so the engine's system prompt is folded into the
-    prompt text. No process is spawned until :meth:`think` is called.
+    answer but cannot act on the machine at all. The ONE exception is
+    ``web_search=True`` (the evidence-gatherer role), which adds web search/fetch
+    and ONLY those (see :data:`CLAUDE_WEB_TOOLS`) so the role can verify sources
+    rather than recite them from memory; nothing else becomes reachable. The
+    one-shot ``-p`` mode has no separate system channel, so the engine's system
+    prompt is folded into the prompt text. No process is spawned until
+    :meth:`think` is called.
 
     :param model: the Claude model id passed to ``--model`` (defaults to Opus
         4.8, the locked Claude-side model for every role).
@@ -130,11 +145,16 @@ class ClaudeCliThinker:
         *,
         runner: Runner | None = None,
         timeout: int = DEFAULT_TIMEOUT_SECONDS,
+        web_search: bool = False,
     ) -> None:
         if not model:
             raise ValueError("ClaudeCliThinker requires a non-empty model id")
         self.model = model
         self.timeout = timeout
+        # When True, this role gets real web search/fetch (and ONLY those) so it
+        # can verify sources instead of reciting them from memory. The factory
+        # sets it for the evidence gatherer; every other role stays deny-all.
+        self.web_search = bool(web_search)
         self._runner: Runner = runner if runner is not None else _default_runner
         # Token usage accumulated across think() calls so the engine's
         # token-budget ceiling (harness._thinker_tokens reads `tokens_used`) can
@@ -154,13 +174,19 @@ class ClaudeCliThinker:
         ``--setting-sources user`` loads only user-level settings so a project or
         local allow-rule cannot re-open a tool for the adversarial run. The model
         can reason and answer but cannot act on the machine. Split out so the test
-        suite can assert the argv shape without spawning the CLI. Both ``--tools``
-        and ``--disallowedTools`` are variadic; ``--disallowedTools`` stays last,
-        and ``--tools ""`` is followed immediately by another flag so it collects
-        only the empty string.
+        suite can assert the argv shape without spawning the CLI.
+
+        When :attr:`web_search` is set (the evidence gatherer), the deny-all
+        ``--tools ""`` is replaced by ``--tools WebSearch WebFetch`` (availability
+        restricted to exactly the web pair plus the LSP survivor) AND
+        ``--allowedTools WebSearch WebFetch`` (pre-approval so they run under
+        ``--permission-mode default``). Nothing dangerous becomes reachable; the
+        role gains real source verification. ``--disallowedTools LSP`` stays last
+        (variadic), with the variadic ``--tools``/``--allowedTools`` lists each
+        terminated by the next flag.
         """
         folded = _fold_system(system, prompt)
-        return [
+        argv = [
             CLAUDE_BIN,
             "-p",
             folded,
@@ -173,11 +199,18 @@ class ClaudeCliThinker:
             "--strict-mcp-config",
             "--setting-sources",
             "user",
-            "--tools",
-            "",
-            "--disallowedTools",
-            *CLAUDE_RESIDUAL_DENY,
         ]
+        if self.web_search:
+            argv += [
+                "--tools",
+                *CLAUDE_WEB_TOOLS,
+                "--allowedTools",
+                *CLAUDE_WEB_TOOLS,
+            ]
+        else:
+            argv += ["--tools", ""]
+        argv += ["--disallowedTools", *CLAUDE_RESIDUAL_DENY]
+        return argv
 
     def think(
         self,
@@ -454,7 +487,13 @@ def build_role_thinkers(config: Any) -> dict[str, Any]:
         family = config.backend_for_role(role)
         model = config.model_for_role(role)
         if family == FAMILY_CLAUDE:
-            thinkers[role] = ClaudeCliThinker(model)
+            # The evidence gatherer gets real web search so it can verify sources
+            # instead of reciting them from memory; every other Claude role stays
+            # deny-all. Off-switch: config.evidence_web_search = False.
+            web = role == "evidence_gatherer" and getattr(
+                config, "evidence_web_search", True
+            )
+            thinkers[role] = ClaudeCliThinker(model, web_search=web)
         elif family == FAMILY_CODEX:
             thinkers[role] = CodexCliThinker(model, reasoning_effort=reasoning_effort)
         else:

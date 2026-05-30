@@ -338,6 +338,44 @@ def _vocabulary_block() -> str:
     )
 
 
+# Tool-denied honesty mandate. The Claude-side roles run with ALL tools denied
+# (no web, no lookup), so every specific figure or citation they produce is
+# RECALLED from training memory and may be wrong. Without this clause a tool-
+# denied run asserts manufactured-precision statistics as established fact, and a
+# fabricated number can become the load-bearing evidence in a verdict (a verified
+# failure mode from the readiness probes). These clauses force the model to flag
+# recall-vs-verification, and force the judge to discount unverifiable specifics
+# rather than treat them as established findings.
+_RECALL_HONESTY = (
+    " You have NO way to look anything up; you are answering from memory. Any "
+    "specific number, statistic, date, study name, agency or report title, or "
+    "citation you give is RECALLED and may be wrong or misremembered -- mark every "
+    "such item as unverified (prefix it '(recalled, unverified)') and never state "
+    "false precision. Prefer qualitative, checkable reasoning over invented "
+    "specifics; an honest 'I cannot verify the exact figure' beats a confident "
+    "fabricated one."
+)
+_JUDGE_HONESTY = (
+    " CRITICAL: treat every specific figure and named-source citation in the "
+    "debate as UNVERIFIED recall UNLESS it carries a real source URL the evidence "
+    "gatherer retrieved. Do NOT let an unverifiable specific be the deciding "
+    "evidence -- discount it and rule on reasoning that holds without trusting an "
+    "unverifiable number. If the support rests mainly on recalled specifics with "
+    "no real citation, the claim is unproven, so settle=false."
+)
+
+# The evidence gatherer (and ONLY it) has real web search/fetch, so its mandate
+# is the opposite of the recall-honesty clause: verify, do not recite. If search
+# is unavailable (web disabled) the "mark it unverified" fallback degrades it to
+# the same honesty floor as the tool-denied roles.
+_EVIDENCE_WEB = (
+    " You HAVE web search and fetch tools -- USE them. Look up real sources to "
+    "VERIFY the evidence, and put the actual URLs you retrieved into the citations "
+    "array. Do not assert a figure, statistic, or study you did not verify this "
+    "way. If a search fails or you cannot find a real source, say so plainly and "
+    "mark that item '(recalled, unverified)' rather than inventing a citation."
+)
+
 # Each role's allowed move names and the system instruction that tells the
 # thinker the exact JSON shape to emit. The role agent extracts the first JSON
 # object from the returned text, validates it, and dispatches one ops.* call.
@@ -350,6 +388,7 @@ ROLE_SYSTEM: dict[str, str] = {
         '"content":"<the claim, stated to be attacked>",'
         '"citations":[],"tags":[]}\n'
         "Or stop the loop with: {\"move\":\"done\",\"reason\":\"...\"}."
+        + _RECALL_HONESTY
     ),
     "critic": (
         "You are the CRITIC, running on a DIFFERENT model family than the "
@@ -360,6 +399,7 @@ ROLE_SYSTEM: dict[str, str] = {
         '"title":"<short objection title>",'
         '"content":"<what weakens or falsifies the claim>","citations":[]}\n'
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
+        + _RECALL_HONESTY
     ),
     "evidence_gatherer": (
         "You are the EVIDENCE GATHERER. The critic already supplies the "
@@ -373,6 +413,7 @@ ROLE_SYSTEM: dict[str, str] = {
         '  {"move":"oppose","target":"<claim handle>","title":"<short>",'
         '"content":"<opposing evidence>","citations":[]}\n'
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
+        + _EVIDENCE_WEB
     ),
     "judge": (
         "You are the JUDGE. Rule on the target claim only after a genuine "
@@ -387,6 +428,7 @@ ROLE_SYSTEM: dict[str, str] = {
         "MUST be false -- you still record the ruling, you just do not ratify "
         "it. NEVER ratify (settle=true) a claim your own verdict rejects.\n"
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
+        + _JUDGE_HONESTY
     ),
     "synthesizer": (
         "You are the SYNTHESIZER. Harvest the settled debate into one synthesis "
@@ -394,6 +436,9 @@ ROLE_SYSTEM: dict[str, str] = {
         '  {"move":"harvest","target":"<claim handle>",'
         '"title":"<short synthesis title>","content":"<the takeaway>"}\n'
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
+        + _RECALL_HONESTY
+        + " Carry the unverified status of any recalled figure into the synthesis;"
+        " never present a recalled specific as a settled fact."
     ),
 }
 
