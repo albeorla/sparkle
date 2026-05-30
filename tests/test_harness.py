@@ -178,6 +178,13 @@ class HarnessEngineTestCase(unittest.TestCase):
         # The judge settled, so the run reaches the 'judged' terminal status.
         self.assertEqual(result["status"], "judged")
 
+        # The run reports moves honestly: the counter is `moves_made` (one per
+        # move), NOT a "rounds" label that an unattended operator could misread
+        # as multiple adversarial exchanges. The old misleading `rounds_run`
+        # key is gone, and the count equals the number of moves recorded.
+        self.assertNotIn("rounds_run", result)
+        self.assertEqual(result["moves_made"], len(result["moves"]))
+
         # The objection is a real attack from a DIFFERENT author (the critic),
         # wired objection --contradicts--> claim.
         data = self.store.read()

@@ -327,7 +327,6 @@ def main(argv: list[str] | None = None) -> int:
         if result.get("claim_id"):
             print(f"Handle: {result['claim_id'][:12]}")
         print(f"Status: {result.get('status', 'done')}")
-        print(f"Rounds: {result.get('rounds_run', 0)}")
         print(f"Moves: {len(result.get('moves', []))}")
         signal = result.get("final_signal")
         if signal is not None:

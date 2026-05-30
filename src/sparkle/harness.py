@@ -940,7 +940,7 @@ class AutonomousEngine:
     def run(self, seed_question: str, *, run_id: str | None = None) -> dict[str, Any]:
         """Run the full propose -> critique -> gather -> judge -> synthesize loop.
 
-        Returns ``{run_id, claim_id, status, rounds_run, thinker_calls, moves,
+        Returns ``{run_id, claim_id, status, moves_made, thinker_calls, moves,
         final_signal, summary}`` where ``summary`` is the run-region counts
         (nodes by type/status, edges by relation) filtered on this run's stamp.
         """
@@ -953,7 +953,7 @@ class AutonomousEngine:
 
         moves: list[dict[str, Any]] = []
         thinker_calls = 0
-        rounds_run = 0
+        moves_made = 0
         claim_id: str | None = None
         status = "completed"
         judged = False
@@ -1031,7 +1031,11 @@ class AutonomousEngine:
                     context=context,
                 )
                 moves.append(result.as_dict())
-                rounds_run += 1
+                # One increment per move (not per "round"): the engine is a
+                # phase walk, not a round loop, so this counts moves made. Kept
+                # distinct from thinker_calls for clarity even though they move
+                # together today (every attempt appends exactly one move).
+                moves_made += 1
 
                 # A done/stop move is role-scoped, not a global kill switch.
                 # The critic and evidence gatherer run BEFORE the judge, and
@@ -1089,7 +1093,7 @@ class AutonomousEngine:
             "run_id": run_id,
             "claim_id": claim_id,
             "status": status,
-            "rounds_run": rounds_run,
+            "moves_made": moves_made,
             "thinker_calls": thinker_calls,
             "moves": moves,
             "final_signal": final_signal,
@@ -1180,7 +1184,7 @@ def _print_summary(result: dict[str, Any]) -> None:
     """Human-readable run summary using the project's ``Handle:`` convention."""
     print(f"Run: {result['run_id']}")
     print(f"Status: {result['status']}")
-    print(f"Rounds: {result['rounds_run']}  Thinker calls: {result['thinker_calls']}")
+    print(f"Moves: {result['moves_made']}  Thinker calls: {result['thinker_calls']}")
     if result.get("claim_id"):
         print(f"Handle: {result['claim_id'][:12]}")
     signal = result.get("final_signal")
