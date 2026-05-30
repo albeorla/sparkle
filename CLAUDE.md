@@ -6,7 +6,7 @@ Claim-graph research MVP with content-addressed provenance. Pure Python 3.11+, z
 
 - `src/sparkle/` — package
   - `models.py`, `graph.py`, `templates.py`, `bootstrap.py`, `presentation.py` — the stdlib-pure kernel
-  - `ops.py` — the operations contract: every graph action as a function returning JSON-able data; the debate invariants, the referee/transition engine, the dedup gate, the alias sidecar, the frontier, and the advisory file lock all live here. The single surface every front-end calls.
+  - `ops.py` — the operations contract: every graph action as a function returning JSON-able data; the debate invariants, the referee/transition engine, the dedup gate, the alias sidecar, the frontier, the run manifest (the per-run configured role-to-family/model roster under the top-level `runs` key, written/read via `write_run_manifest`/`run_manifest`), and the advisory file lock all live here. The single surface every front-end calls.
   - `cli.py` — a thin formatter; each command makes one `ops.py` call and prints
   - `mcp_server.py` — MCP server, a thin FastMCP adapter over `ops.py` (only imported by the lazy `sparkle mcp` subcommand, so the core stays dependency-free)
 - `tests/test_cli.py` — integration tests via unittest
@@ -56,20 +56,20 @@ Four docs must stay in sync with code changes: `README.md`, `docs/prd.md`, `docs
 Documentation sources and what to check in each:
 
 - `README.md`
-  - "Where It's Going" table and "Intelligent Operation (MCP)" section match what shipped (interactive operator works; autonomous harness does not)
-  - Graph model status list matches `NodeStatus` in `models.py` (including `ratified` as terminal)
+  - "Where It's Going", "Intelligent Operation (MCP)", and "Autonomous Operation (`sparkle run`)" match what shipped (interactive operator works; the autonomous harness now runs live end-to-end, validated by hand on 2026-05-29, not gated/not-built)
+  - Graph model status list matches `NodeStatus` in `models.py` (including `ratified` as terminal); the live `judged` signal (a ruling exists but did not settle the claim) is documented as distinct from `ratified` (actually settled)
   - Class diagram: fields and methods on Node, Edge, GraphStore, BranchTemplate match code
   - Sequence diagram: add-branch flow matches `cli.py` call sequence
   - State diagram: status values match `NodeStatus`, including the `ratified` terminal transition
   - Source layout: all files in `src/sparkle/` listed, including `ops.py` and `mcp_server.py`, with the `ops.py` seam called out
-  - CLI Reference: all subcommands documented (including `relations`, `revise`, `import`, `mcp`) with the `--link-to`/`--relation`, `--as`, and `--ids-only` flags
-  - Testing section: test count and coverage list match actual test methods
-  - "Current Limits" and "Where It's Going": nothing listed that's already implemented
+  - CLI Reference: all subcommands documented (including `relations`, `revise`, `import`, `mcp`, `run`, and `run-manifest`) with the `--link-to`/`--relation`, `--as`, and `--ids-only` flags, plus `run`'s `--rounds`/`--max-moves`/`--run-id` and the `SPARKLE_CODEX_REASONING_EFFORT` env knob; `run` output is documented as showing a `Moves:` count (not `Rounds:`) and a `Cross-family:` line, and `run-manifest <run_id>` reads back the configured role-to-family/model roster
+  - Testing section: test count and coverage list match actual test methods (the live cross-family debate is validated by hand, not by the suite), including the run-manifest round-trip / id-stability tests and the engine reporting `moves_made` (never `rounds_run`)
+  - "Current Limits" and "Where It's Going": nothing listed that's already implemented; the live debate runs but is token-heavy. Keep two distinct points straight and do not conflate them: the verdict-rejection floor (a judge may not ratify a claim its own verdict rejected) is STRUCTURAL on the autonomous path (settle is honored only for an `upheld` verdict), while net=0 ratification is INTENTIONAL by design — once a cross-family objection exists and the judge upholds with settle requested, the judge MAY settle on tied evidence because it weighs the debate rather than counting votes; frame this as "the judge's reasoning is sovereign; ratification is not gated on net-positive support," NOT as a missing floor (note that a 0-support AND 0-objection claim still cannot ratify, because the cross-family gate needs a challenge first). The cross-family setup is auditable from the saved graph via `sparkle run-manifest`, with the honest caveat that the manifest records the CONFIGURED roster, not a runtime probe of which model answered each call. The autonomous-side Claude lockdown is documented as deny-all (`--tools ""` plus an explicit deny for the one surviving tool, plus `--setting-sources user`, `--permission-mode default`, `--strict-mcp-config`, throwaway tempdir), NOT the old 7-tool deny-list; a mid-run model-CLI failure is documented as one `error` move that keeps the loop going (not a crash)
 - `docs/prd.md`
-  - "MVP status" matches what's built (ops.py seam, ratified status, MCP server/extra, interactive operator, revise/import/aliases/dedup)
-  - "Next usability focus" only lists unbuilt work (autonomy, `--format json`, standalone introspection, undo, session logging)
+  - "MVP status" matches what's built (ops.py seam, ratified status, MCP server/extra, interactive operator, revise/import/aliases/dedup, the working autonomous loop including its cost knobs and the `judged` signal, the honest `Moves:` count, and the saved-graph cross-family audit via the `runs` manifest key — `sparkle run-manifest` / `sparkle_run_manifest` / the `sparkle://run/{run_id}/manifest` resource — described as the CONFIGURED roster, not a runtime model probe)
+  - "Next usability focus" only lists unbuilt work (`--format json`, standalone introspection, undo, session logging); autonomy is built, so it must not appear here as future work. Net=0 ratification is framed as an INTENTIONAL design choice (the judge weighs, it does not count votes; ratification is not gated on net-positive support), NOT a missing floor, and kept distinct from the structural verdict-rejection floor. The MVP-status list documents the untrusted JSON import (terminal-status guard, `trusted=True` opt-in only for export round-trips) and the deny-all Claude lockdown
 - `docs/roadmap.md`
-  - "Completed" includes all shipped work
-  - "Next" leads with the autonomous harness (Phase 2) as gated/not-done; phase sections only list unbuilt items
+  - "Completed" includes all shipped work, including the Phase 2 autonomous harness as shipped and running live, the honest `Moves:` count (not `Rounds:`), and the saved-graph cross-family audit (the `runs` manifest key via `sparkle run-manifest` / `sparkle_run_manifest` / the manifest resource), described as the configured roster rather than a runtime model probe
+  - "Next" leads with the still-unbuilt polish track (Phase 2b: `--format json`, query language, introspection, undo, session logging); it must not list the autonomous harness as gated/not-done, and net=0 ratification (intentional by design) must not appear as unbuilt/next work
 - `CLAUDE.md` (this file)
   - Project structure, key conventions, and the running section reflect `ops.py`, `mcp_server.py`, and the MCP extra/command
