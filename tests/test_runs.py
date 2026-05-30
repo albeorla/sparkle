@@ -403,11 +403,24 @@ class RatifyRegionTests(RunTestBase):
     """
 
     def _ratify_region(self, run_id: str) -> dict:
-        """Mirror of sparkle_ratify_region (mcp_server.py:525-550)."""
+        """Mirror of sparkle_ratify_region, including its convergence guard."""
+        data = self.store.read()
+
+        def already_cleared(node_id: str) -> bool:
+            for edge in data["edges"].values():
+                if edge["relation"] != "supersedes" or edge["to_id"] != node_id:
+                    continue
+                m = data["nodes"].get(edge["from_id"], {}).get("metadata", {})
+                if not m.get("provisional", False) and m.get("ratified_run") == run_id:
+                    return True
+            return False
+
         ratified: list[dict] = []
         for node in _run_nodes(self.store, run_id):
             meta = dict(node.get("metadata", {}))
             if not meta.get("provisional"):
+                continue
+            if already_cleared(node["node_id"]):
                 continue
             meta["provisional"] = False
             meta["ratified_run"] = run_id
@@ -446,11 +459,15 @@ class RatifyRegionTests(RunTestBase):
         # ratification of a claim goes through rule(settle=True)).
         self.assertEqual(accepted["status"], "active")
 
-    def test_ratify_region_skips_the_accepted_copy_but_refires_on_original(self) -> None:
-        """The accepted copy IS skipped (provisional cleared), but the frozen
-        original stays provisional and run-tagged, so a second ratify re-fires
-        on it. Same non-idempotency root as rollback: region ops supersede but
-        never neutralize the original. Pins the current behavior; see findings.
+    def test_ratify_region_converges_second_pass_is_a_noop(self) -> None:
+        """Region ratify converges: a second pass finds nothing left to clear.
+
+        The frozen original keeps its provisional flag forever (nodes are never
+        mutated), so without a guard ratify would re-supersede it on every call
+        and report count=1 forever (the non-convergence defect the robustness
+        sweep found). The convergence guard skips an original already superseded
+        by a CLEARED (provisional=False, ratified_run==run_id) version, so the
+        second pass returns 0 instead of re-firing.
         """
         self.add_run_node(run_id="sess", title="Claim", content="body")
         first = self._ratify_region("sess")
@@ -463,13 +480,13 @@ class RatifyRegionTests(RunTestBase):
         # One accepted copy (False) + the frozen original (True).
         self.assertEqual(provisional_flags, [False, True])
 
-        # The accepted copy is correctly skipped (provisional already cleared),
-        # but the still-provisional original is re-superseded -> count 1, not 0.
+        # The original is now superseded by a cleared version, so the second pass
+        # skips it and converges to count 0 (no forked re-supersession).
         second = self._ratify_region("sess")
         self.assertEqual(
             second["count"],
-            1,
-            "region ratify re-fires on the still-provisional frozen original",
+            0,
+            "region ratify should converge: nothing left to clear on the second pass",
         )
 
     def test_ratify_region_rehomes_inbound_edges_onto_accepted_version(self) -> None:
@@ -813,6 +830,53 @@ class ErrorPathTests(RunTestBase):
         )
         with self.assertRaisesRegex(ValueError, r"rule\(\) targets a claim"):
             ops.rule(self.store, ev["node_id"], verdict="accept")
+
+    # -- Seam hardening found by the MCP robustness sweep: hostile input must
+    #    fail CLOSED with a ValueError (never a TypeError/AttributeError crash,
+    #    never an off-vocabulary persist, never an orphan partial write).
+
+    def test_non_numeric_confidence_fails_closed_with_value_error(self) -> None:
+        # The model-confidence cap did min(confidence, 0.5); a non-numeric value
+        # raised an uncaught TypeError. Now it is a clean ValueError on both paths.
+        with self.assertRaisesRegex(ValueError, r"confidence must be a number"):
+            ops.add_node(
+                self.store, node_type="claim", title="C", content="b",
+                confidence="high", model_authored=True,
+            )
+        with self.assertRaisesRegex(ValueError, r"confidence must be a number"):
+            ops.add_node(
+                self.store, node_type="claim", title="C2", content="b2",
+                confidence="high", model_authored=False,
+            )
+
+    def test_off_vocabulary_status_is_rejected_at_the_write_gate(self) -> None:
+        # guard_authored_status only blocks TERMINAL statuses; the write gate now
+        # enforces the full NodeStatus whitelist so a model cannot plant a made-up
+        # status word that dodges the frontier/rollback status logic.
+        with self.assertRaisesRegex(ValueError, r"unknown status"):
+            ops.add_node(
+                self.store, node_type="claim", title="S", content="b",
+                status="bogusstatus", model_authored=True,
+            )
+        self.assertEqual(ops.list_nodes(self.store), [])
+
+    def test_non_string_verdict_fails_closed_with_value_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"verdict must be a string"):
+            ops.rule(self.store, "anyref", verdict=None, settle=True)
+
+    def test_non_string_ref_raises_value_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"node ref must be a string"):
+            self.store.resolve_id(12345)
+
+    def test_fused_link_to_bad_ref_writes_no_orphan_node(self) -> None:
+        # A fused write whose link target does not resolve must fail BEFORE the
+        # node is written, so no orphan is left persisted (atomic fused write).
+        with self.assertRaisesRegex(ValueError, r"No node found for prefix"):
+            ops.add_node(
+                self.store, node_type="synthesis", title="Orphan?", content="x",
+                link_to="ffffffffffff", relation="produced", model_authored=True,
+            )
+        self.assertEqual(ops.list_nodes(self.store), [])
 
 
 # ===========================================================================

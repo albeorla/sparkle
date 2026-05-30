@@ -565,10 +565,29 @@ def build_app() -> FastMCP:
         ``sparkle_rule`` with ``settle=True`` so the challenge invariant holds.
         """
         store = _store()
+        data = store.read()
+
+        def _already_cleared(node_id: str) -> bool:
+            # An original already superseded by a CLEARED (ratified) version is
+            # done. The frozen original keeps its provisional flag forever, so
+            # without this guard ratify_region re-supersedes it on every call and
+            # never converges (count=1 reported forever). Mirrors rollback_run's
+            # supersession skip-guard, but keyed on the cleared-metadata stamp
+            # since a region ratification stays 'active' (not a terminal status).
+            for edge in data["edges"].values():
+                if edge["relation"] != "supersedes" or edge["to_id"] != node_id:
+                    continue
+                src_meta = data["nodes"].get(edge["from_id"], {}).get("metadata", {})
+                if not src_meta.get("provisional", False) and src_meta.get("ratified_run") == run_id:
+                    return True
+            return False
+
         ratified: list[dict[str, Any]] = []
         for node in _run_nodes(run_id):
             meta = dict(node.get("metadata", {}))
             if not meta.get("provisional"):
+                continue
+            if _already_cleared(node["node_id"]):
                 continue
             meta["provisional"] = False
             meta["ratified_run"] = run_id

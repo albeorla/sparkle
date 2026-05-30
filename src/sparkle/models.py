@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 import hashlib
 import json
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 DEFAULT_NODE_TYPES = {
     "claim",
@@ -38,6 +38,11 @@ NodeStatus = Literal[
     "ratified",
 ]
 
+# The valid stored statuses, derived from NodeStatus so there is one source of
+# truth. Used as the write-gate whitelist (GraphStore._validate_node) so no front
+# end can persist an off-vocabulary status word.
+DEFAULT_NODE_STATUSES: frozenset[str] = frozenset(get_args(NodeStatus))
+
 
 def utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
@@ -57,8 +62,20 @@ class Node:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.confidence is not None and not (0.0 <= self.confidence <= 1.0):
-            raise ValueError(f"confidence must be between 0.0 and 1.0, got {self.confidence}")
+        if self.confidence is not None:
+            # Type guard BEFORE the range comparison: a non-numeric confidence
+            # (e.g. a hostile "high") would make `0.0 <= confidence` raise an
+            # uncaught TypeError; fail closed with the documented ValueError.
+            if isinstance(self.confidence, bool) or not isinstance(
+                self.confidence, (int, float)
+            ):
+                raise ValueError(
+                    f"confidence must be a number between 0.0 and 1.0, got {self.confidence!r}"
+                )
+            if not (0.0 <= self.confidence <= 1.0):
+                raise ValueError(
+                    f"confidence must be between 0.0 and 1.0, got {self.confidence}"
+                )
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)

@@ -232,6 +232,13 @@ def cap_confidence(
     """
     if confidence is None:
         return None
+    # Type guard before min(): a non-numeric confidence (e.g. a hostile "high")
+    # would make min(str, float) raise an uncaught TypeError, escaping the
+    # ValueError-only boundary every front-end relies on. Fail closed instead.
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+        raise ValueError(
+            f"confidence must be a number between 0.0 and 1.0, got {confidence!r}"
+        )
     return min(confidence, cap)
 
 
@@ -380,6 +387,12 @@ def add_node(
         metadata.setdefault("run_id", run_id)
 
     with graph_lock(store):
+        # Resolve the fused-link target BEFORE any write so a bad/ambiguous
+        # link_to fails closed (clean ValueError) instead of leaving an orphan
+        # node persisted while the caller sees a failure. add_branch already
+        # resolves its parent ref before writing; this brings add_node to parity.
+        if link_to is not None:
+            store.resolve_id(link_to)
         dup = find_duplicate(
             store, node_type=node_type, title=title, content=content
         )
@@ -1020,6 +1033,8 @@ def rule(
 
     Returns the decision view and, when settled, the superseding claim view.
     """
+    if not isinstance(verdict, str):
+        raise ValueError("verdict must be a string")
     run_meta = {"run_id": run_id} if run_id is not None else {}
     with graph_lock(store):
         claim_id = store.resolve_id(claim_ref)

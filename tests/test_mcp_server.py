@@ -564,6 +564,13 @@ class McpServerTestCase(unittest.TestCase):
         # Model-honest supersession: a new node carries the cleared stamp.
         self.assertNotEqual(accepted["node_id"], added["node_id"])
 
+        # Convergence: a second pass finds the original already cleared and is a
+        # no-op (count 0), instead of re-superseding the frozen-provisional
+        # original forever. Regression for the robustness-sweep non-convergence
+        # defect.
+        again = self.call_tool("sparkle_ratify_region", {"run_id": run_id})
+        self.assertEqual(again["count"], 0)
+
     def test_rollback_run_abandons_run_nodes_via_supersession(self) -> None:
         """Rollback supersedes each run node to status 'abandoned' (no delete)."""
         run_id = "region-3"

@@ -6,7 +6,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .models import DEFAULT_EDGE_RELATIONS, DEFAULT_NODE_TYPES, Edge, Node
+from .models import (
+    DEFAULT_EDGE_RELATIONS,
+    DEFAULT_NODE_STATUSES,
+    DEFAULT_NODE_TYPES,
+    Edge,
+    Node,
+)
 
 
 class GraphStore:
@@ -114,6 +120,8 @@ class GraphStore:
         return sorted(data["edges"].items(), key=lambda item: item[1].get("created_at", ""))
 
     def resolve_id(self, prefix: str) -> str:
+        if not isinstance(prefix, str):
+            raise ValueError("node ref must be a string")
         if not prefix or not prefix.strip():
             raise ValueError("node prefix cannot be empty")
         data = self._read()
@@ -220,6 +228,11 @@ class GraphStore:
     def _validate_node(self, node: Node) -> None:
         if node.node_type not in self.node_types:
             raise ValueError(f"unknown node_type: {node.node_type}")
+        # Status whitelist at the universal write gate, so no front-end can
+        # persist an off-vocabulary status word (the guard_authored_status floor
+        # only blocks TERMINAL statuses from model writes; this catches the rest).
+        if node.status not in DEFAULT_NODE_STATUSES:
+            raise ValueError(f"unknown status: {node.status}")
 
     def _validate_edge(self, edge: Edge) -> None:
         if edge.relation not in self.edge_relations:
