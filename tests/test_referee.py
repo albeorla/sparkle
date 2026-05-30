@@ -137,6 +137,41 @@ class EdgeTallyTests(RefereeTestCase):
         self.store.add_edge(Edge(from_id=dec2, to_id=claim, relation="evaluates"))
         self.assertTrue(ops.edge_tally(self.store, claim)["has_decision"])
 
+    def test_verification_node_via_evaluates_is_tally_neutral(self) -> None:
+        """A citation-verifier node attached --evaluates--> claim must not move
+        the vote: supports/contradicts/net stay put, and it does NOT trip
+        has_decision (only a real decision node does). This is why the verifier
+        can sit between gather and judge as advisory context without changing the
+        claim's live signal or faking a ruling.
+        """
+        claim = self._claim()
+        self._support(claim)
+        self._attack(claim)
+        before = ops.edge_tally(self.store, claim)
+        self.assertEqual(before["supports"], 1)
+        self.assertEqual(before["contradicts"], 1)
+        self.assertFalse(before["has_decision"])
+
+        # The verifier's output: a 'verification' node evaluating the claim.
+        verdict = self._node(
+            "verification", "Citation check", "NEJM 2022 link is a commentary."
+        )
+        self.store.add_edge(
+            Edge(from_id=verdict, to_id=claim, relation="evaluates")
+        )
+
+        after = ops.edge_tally(self.store, claim)
+        self.assertEqual(after["supports"], before["supports"])
+        self.assertEqual(after["contradicts"], before["contradicts"])
+        self.assertEqual(after["net"], before["net"])
+        # An 'evaluates' edge from a non-decision node never trips the ruling flag.
+        self.assertFalse(after["has_decision"])
+        # The live referee signal is unchanged too (still ready_to_judge: both a
+        # support and an objection, no ruling yet).
+        self.assertEqual(
+            ops.referee_signal(self.store, claim)["live_signal"], "ready_to_judge"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Transition-rule engine: drive each lifecycle edge from the BUILTIN_PLAYBOOK

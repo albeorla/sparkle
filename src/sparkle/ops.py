@@ -851,6 +851,7 @@ BUILTIN_PLAYBOOK: dict[str, Any] = {
         "proposer": {"node_type": "claim", "relation": None},
         "critic": {"node_type": "objection", "relation": "contradicts"},
         "evidence_gatherer": {"node_type": "evidence", "relation": "supports"},
+        "verifier": {"node_type": "verification", "relation": "evaluates"},
         "judge": {"node_type": "decision", "relation": "evaluates"},
         "synthesizer": {"node_type": "synthesis", "relation": "produced"},
     },
@@ -858,6 +859,7 @@ BUILTIN_PLAYBOOK: dict[str, Any] = {
         {"name": "propose", "role": "proposer", "max_iterations": 1},
         {"name": "critique", "role": "critic", "max_iterations": 3},
         {"name": "gather", "role": "evidence_gatherer", "max_iterations": 3},
+        {"name": "verify", "role": "verifier", "max_iterations": 1},
         {"name": "judge", "role": "judge", "max_iterations": 1},
         {"name": "synthesize", "role": "synthesizer", "max_iterations": 1},
     ],
@@ -912,6 +914,7 @@ BUILTIN_PLAYBOOK: dict[str, Any] = {
         "judge ruled (an accepted decision evaluates the claim)",
         "critique rounds exhausted with no new objection",
         "stalled twice in a row -> abandoned",
+        "verify phase has no cited URLs to re-fetch (verifier emits 'done')",
     ],
 }
 

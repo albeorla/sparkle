@@ -473,13 +473,13 @@ StubThinker = ScriptedThinker
 # ---------------------------------------------------------------------------
 
 
-_ROLES = ("proposer", "critic", "judge", "evidence_gatherer", "synthesizer")
+_ROLES = ("proposer", "critic", "judge", "evidence_gatherer", "verifier", "synthesizer")
 
 
 def build_role_thinkers(config: Any) -> dict[str, Any]:
     """Build one CLI thinker per debate role from the config's backend map.
 
-    For each of the five roles the engine drives, this reads the backend FAMILY
+    For each of the roles the engine drives, this reads the backend FAMILY
     (``config.backend_for_role(role)`` -> ``"claude"`` | ``"codex"``) and the
     model id (``config.model_for_role(role)``) and constructs the matching CLI
     thinker. Each role gets its OWN instance even when two roles share a backend
@@ -503,13 +503,20 @@ def build_role_thinkers(config: Any) -> dict[str, Any]:
         family = config.backend_for_role(role)
         model = config.model_for_role(role)
         if family == FAMILY_CLAUDE:
-            # Two roles get real web search; every other role stays deny-all. The
-            # evidence gatherer (Claude) verifies SUPPORTING sources, and the
+            # Three roles get real web search; every other role stays deny-all.
+            # The evidence gatherer (Claude) verifies SUPPORTING sources, the
             # critic (Codex) retrieves OPPOSING sources so its attack is
-            # source-backed rather than recalled. Off-switches:
-            # config.evidence_web_search / config.critic_web_search = False.
-            web = role == "evidence_gatherer" and getattr(
-                config, "evidence_web_search", True
+            # source-backed rather than recalled, and the verifier (Claude)
+            # re-fetches the URLs the critic/evidence cited to check each figure
+            # is actually bound to the source it claims. Off-switches:
+            # config.evidence_web_search / config.critic_web_search /
+            # config.verifier_web_search = False.
+            web = (
+                role == "evidence_gatherer"
+                and getattr(config, "evidence_web_search", True)
+            ) or (
+                role == "verifier"
+                and getattr(config, "verifier_web_search", True)
             )
             thinkers[role] = ClaudeCliThinker(model, web_search=web)
         elif family == FAMILY_CODEX:

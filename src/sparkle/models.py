@@ -14,6 +14,7 @@ DEFAULT_NODE_TYPES = {
     "inference",
     "decision",
     "synthesis",
+    "verification",
 }
 
 DEFAULT_EDGE_RELATIONS = {
@@ -26,7 +27,7 @@ DEFAULT_EDGE_RELATIONS = {
     "supersedes",
 }
 
-NodeType = Literal["claim", "evidence", "question", "objection", "inference", "decision", "synthesis"]
+NodeType = Literal["claim", "evidence", "question", "objection", "inference", "decision", "synthesis", "verification"]
 
 NodeStatus = Literal[
     "active",

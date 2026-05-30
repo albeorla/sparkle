@@ -158,6 +158,84 @@ class HarnessEngineTestCase(unittest.TestCase):
         kwargs.update(overrides)
         return HarnessConfig(**kwargs)
 
+    # -- Verifier dispatch: a 'verify' move writes a tally-neutral check ----
+
+    def test_verify_move_writes_a_tally_neutral_verification_node(self) -> None:
+        """A verifier 'verify' move attaches a verification node to the claim via
+        an 'evaluates' edge: run-region tagged and judge-visible, but tally-neutral
+        (it does not shift the support/contradict counts or trip the 'judged'
+        signal). The full-round scripts never script a 'verify' move, so this is
+        the one test that exercises the dispatch branch directly."""
+        claim = ops.add_node(
+            self.store,
+            node_type="claim",
+            title="Claim with a cited figure",
+            content="A figure attributed to a retrieved source.",
+            author="proposer",
+            model_authored=True,
+        )
+        claim_id = claim["node_id"]
+        # A support node carrying a citation the verifier would re-fetch.
+        ops.add_branch(
+            self.store,
+            from_ref=claim_id,
+            template="support",
+            title="Supporting figure",
+            content="Figure X, per the cited source.",
+            citations=["https://example.org/study"],
+            author="evidence_gatherer",
+            model_authored=True,
+        )
+
+        # The script omits 'target'; the agent injects the live target id.
+        thinker = StubThinker(
+            {
+                "verifier": _move(
+                    "verify",
+                    title="Citation check",
+                    content=(
+                        "The cited URL resolves but is a commentary, not the "
+                        "study itself; the figure is mis-bound."
+                    ),
+                    citations=["https://example.org/study"],
+                )
+            }
+        )
+        agent = RoleAgent("verifier", self._config(), run_id="run-verify")
+        prompt, context = harness._render_prompt(
+            self.store, "verifier", "seed", claim_id
+        )
+        outcome = agent.act(
+            self.store, thinker, target_id=claim_id, prompt=prompt, context=context
+        )
+        self.assertEqual(outcome.outcome, "written")
+
+        data = self.store._read()
+        # Stored nodes are keyed BY id, so the id is the dict key.
+        verifs = [
+            (nid, n)
+            for nid, n in data["nodes"].items()
+            if n["node_type"] == "verification"
+        ]
+        self.assertEqual(len(verifs), 1)
+        vid, vnode = verifs[0]
+        # The verification node is the SOURCE of an 'evaluates' edge into the claim.
+        evaluates = [
+            e
+            for e in data["edges"].values()
+            if e["from_id"] == vid
+            and e["to_id"] == claim_id
+            and e["relation"] == "evaluates"
+        ]
+        self.assertEqual(len(evaluates), 1)
+        # Run-region: the node carries the run id.
+        self.assertEqual(vnode["metadata"].get("run_id"), "run-verify")
+        # Tally-neutral: support count is untouched and no ruling is implied.
+        tally = ops.edge_tally(self.store, claim_id)
+        self.assertFalse(tally["has_decision"])
+        self.assertEqual(tally["supports"], 1)
+        self.assertEqual(tally["contradicts"], 0)
+
     # -- (1) Full scripted round produces a coherent, run-tagged graph ------
 
     def test_full_round_produces_claim_distinct_objection_and_ruling(self) -> None:
@@ -276,11 +354,19 @@ class HarnessEngineTestCase(unittest.TestCase):
         manifest = ops.run_manifest(self.store, "run-manifest")
         self.assertEqual(manifest, result["manifest"])
 
-        # All five roles are rostered with family + model + author.
+        # All six roles are rostered with family + model + author (the citation
+        # verifier joined the roster between gather and judge).
         roles = manifest["roles"]
         self.assertEqual(
             set(roles),
-            {"proposer", "critic", "evidence_gatherer", "judge", "synthesizer"},
+            {
+                "proposer",
+                "critic",
+                "evidence_gatherer",
+                "verifier",
+                "judge",
+                "synthesizer",
+            },
         )
         # The cross-family invariant held and is recorded: the critic ran a
         # DIFFERENT model family than the proposer (codex vs claude).

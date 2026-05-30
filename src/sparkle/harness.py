@@ -122,6 +122,10 @@ _DEFAULT_BACKENDS: dict[str, str] = {
     "critic": CODEX_FAMILY,
     "judge": CLAUDE_FAMILY,
     "evidence_gatherer": CLAUDE_FAMILY,
+    # The citation verifier needs WebFetch to re-fetch the cited URLs, so it
+    # stays Claude-family (where the web-search/fetch gate is wired). It is NOT
+    # the adversary, so it carries no cross-family bar.
+    "verifier": CLAUDE_FAMILY,
     "synthesizer": CLAUDE_FAMILY,
 }
 
@@ -178,6 +182,9 @@ class HarnessConfig:
     evidence_backend: str = field(
         default_factory=lambda: _role_backend_default("evidence_gatherer")
     )
+    verifier_backend: str = field(
+        default_factory=lambda: _role_backend_default("verifier")
+    )
     synthesizer_backend: str = field(
         default_factory=lambda: _role_backend_default("synthesizer")
     )
@@ -194,6 +201,9 @@ class HarnessConfig:
     )
     evidence_model: str = field(
         default_factory=lambda: _role_model_default("evidence_gatherer")
+    )
+    verifier_model: str = field(
+        default_factory=lambda: _role_model_default("verifier")
     )
     synthesizer_model: str = field(
         default_factory=lambda: _role_model_default("synthesizer")
@@ -249,6 +259,14 @@ class HarnessConfig:
     critic_web_search: bool = field(
         default_factory=lambda: os.environ.get("SPARKLE_CRITIC_WEB_SEARCH", "1") != "0"
     )
+    # The verifier role (the citation checker, Claude) gets real web search by
+    # default so it can RE-FETCH the URLs the critic/evidence cited and confirm
+    # each figure is actually bound to the source it claims. Set False (or env
+    # SPARKLE_VERIFIER_WEB_SEARCH=0) to revert it to a search-free verifier that
+    # degrades to the same mark-it-unverified honesty floor as the other roles.
+    verifier_web_search: bool = field(
+        default_factory=lambda: os.environ.get("SPARKLE_VERIFIER_WEB_SEARCH", "1") != "0"
+    )
 
     def __post_init__(self) -> None:
         # Locked invariant: the adversary (critic) MUST be a different backend
@@ -279,6 +297,7 @@ class HarnessConfig:
             "proposer": self.proposer_model,
             "critic": self.critic_model,
             "evidence_gatherer": self.evidence_model,
+            "verifier": self.verifier_model,
             "judge": self.judge_model,
             "synthesizer": self.synthesizer_model,
         }.get(role, self.proposer_model)
@@ -293,6 +312,7 @@ class HarnessConfig:
             "proposer": self.proposer_backend,
             "critic": self.critic_backend,
             "evidence_gatherer": self.evidence_backend,
+            "verifier": self.verifier_backend,
             "judge": self.judge_backend,
             "synthesizer": self.synthesizer_backend,
         }.get(role, CLAUDE_FAMILY)
@@ -314,6 +334,7 @@ class HarnessConfig:
             "proposer",
             "critic",
             "evidence_gatherer",
+            "verifier",
             "judge",
             "synthesizer",
         }
@@ -428,6 +449,20 @@ _CRITIC_WEB = (
     "and mark that item '(recalled, unverified)' rather than inventing a citation."
 )
 
+# The verifier has real web fetch (Claude server-side), so its mandate is to
+# RE-FETCH the URLs already cited in the debate and check that each figure is
+# bound to the source it claims. Like the evidence/critic web clauses, if a fetch
+# fails the "mark it unverified" fallback degrades it to the honesty floor.
+_VERIFIER_WEB = (
+    " You HAVE web search and fetch tools -- USE them. Re-fetch each URL the "
+    "objection/evidence cited and read the source itself; do not trust the "
+    "attribution. For each citation, QUOTE the relevant source line verbatim (or "
+    "a close paraphrase) so a mis-binding is visibly proven from the source text, "
+    "not asserted. If a URL will not load or you cannot find the attributed figure "
+    "on the page, say so plainly and mark that item unverifiable rather than "
+    "inventing a confirmation."
+)
+
 # Each role's allowed move names and the system instruction that tells the
 # thinker the exact JSON shape to emit. The role agent extracts the first JSON
 # object from the returned text, validates it, and dispatches one ops.* call.
@@ -468,6 +503,26 @@ ROLE_SYSTEM: dict[str, str] = {
         "Or stop with: {\"move\":\"done\",\"reason\":\"...\"}."
         + _EVIDENCE_WEB
     ),
+    "verifier": (
+        "You are the CITATION VERIFIER, running AFTER the critic and evidence "
+        "gatherer and BEFORE the judge. The claim's existing reactions shown "
+        "above include the critic's objections and the gatherer's evidence, each "
+        "with the source URLs they retrieved in its citations. Your job: re-fetch "
+        "EACH of those URLs and check whether the source ACTUALLY contains or "
+        "supports the specific figure, quote, or study that the objection or "
+        "evidence attributes to it. Flag every mis-binding explicitly: wrong "
+        "author, wrong year, the URL is a commentary or editorial rather than the "
+        "study itself, the quote is not present in the source, the figure does "
+        "not appear on the page. Return a single JSON object and nothing else:\n"
+        '  {"move":"verify","target":"<claim handle>","title":"<short>",'
+        '"content":"<per-citation verdict: does the URL resolve? does the source '
+        "actually support the attributed figure? if mis-bound, say exactly how; "
+        'quote the relevant source line>","citations":[<the URLs you actually '
+        're-fetched>]}\n'
+        "Or, when there are no cited URLs to check, stop with: "
+        "{\"move\":\"done\",\"reason\":\"...\"}."
+        + _VERIFIER_WEB
+    ),
     "judge": (
         "You are the JUDGE. Rule on the target claim only after a genuine "
         "objection from a DIFFERENT author exists. Weigh the support against "
@@ -498,6 +553,7 @@ ROLE_MOVES: dict[str, set[str]] = {
     "proposer": {"propose", "stop", "done"},
     "critic": {"object", "stop", "done"},
     "evidence_gatherer": {"support", "oppose", "stop", "done"},
+    "verifier": {"verify", "stop", "done"},
     "judge": {"rule", "stop", "done"},
     "synthesizer": {"harvest", "stop", "done"},
 }
@@ -860,6 +916,41 @@ class RoleAgent:
                     )
                 return MoveResult(self.role, name, "written", node_id=node_id)
 
+            if name == "verify":
+                if not (
+                    _nonempty(move.get("target"))
+                    and _nonempty(move.get("content"))
+                ):
+                    return MoveResult(self.role, name, "rejected", message="target+content required")
+                # The verification node is the SOURCE of an 'evaluates' edge into
+                # the claim — same fused-link shape as the synthesizer's harvest,
+                # mirroring mcp_server.sparkle_add_node (link_to/relation/run_id).
+                # 'evaluates' from a non-decision node is tally-neutral and does
+                # NOT trip the 'judged' signal (see ops.edge_tally), so attaching
+                # it leaves the claim's support/contradict counts untouched while
+                # putting the citation check in front of the judge. run_id on the
+                # metadata AND the kwarg lands the node and its fused edge in the
+                # run region.
+                result = ops.add_node(
+                    store,
+                    node_type="verification",
+                    title=move.get("title") or "Citation check",
+                    content=move["content"],
+                    citations=move.get("citations") or None,
+                    author=self.author,
+                    link_to=move["target"],
+                    relation="evaluates",
+                    metadata={
+                        "run_id": self.run_id,
+                        "agent_role": "verifier",
+                        "provisional": True,
+                    },
+                    model_authored=True,
+                    run_id=self.run_id,
+                )
+                outcome = "written" if result.get("created") else "dedup"
+                return MoveResult(self.role, name, outcome, node_id=result["node_id"])
+
             if name == "harvest":
                 if not (
                     _nonempty(move.get("target"))
@@ -1071,7 +1162,7 @@ class AutonomousEngine:
                 "model": cfg.model_for_role(role),
                 "author": cfg.author_for_role(role),
             }
-            for role in ("proposer", "critic", "evidence_gatherer", "judge", "synthesizer")
+            for role in ("proposer", "critic", "evidence_gatherer", "verifier", "judge", "synthesizer")
         }
         manifest = ops.write_run_manifest(
             self.store,
@@ -1179,7 +1270,7 @@ class AutonomousEngine:
                 # still rules. Only a terminal role (or the proposer, which has
                 # produced no claim to judge) ends the whole run.
                 if result.outcome == "stop":
-                    if role in ("critic", "evidence_gatherer"):
+                    if role in ("critic", "evidence_gatherer", "verifier"):
                         break  # role done; the phase walk advances to the judge
                     status = "model-stopped"
                     loop_done = True
@@ -1285,7 +1376,7 @@ def run_cli_loop(
 
     # Runtime CLI-presence check (replaces the old pip-extra ImportError path).
     # Only the families this config actually uses need to be present.
-    roles = ("proposer", "critic", "judge", "evidence_gatherer", "synthesizer")
+    roles = ("proposer", "critic", "judge", "evidence_gatherer", "verifier", "synthesizer")
     used_families = {config.backend_for_role(role) for role in roles}
     cli_for_family = {CLAUDE_FAMILY: "claude", CODEX_FAMILY: "codex"}
     missing = sorted(

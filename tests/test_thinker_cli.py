@@ -594,6 +594,7 @@ _LOCKED_BACKENDS = {
     "critic": "codex",
     "judge": "claude",
     "evidence_gatherer": "claude",
+    "verifier": "claude",
     "synthesizer": "claude",
 }
 _LOCKED_MODELS = {
@@ -601,6 +602,7 @@ _LOCKED_MODELS = {
     "critic": "gpt-5.5",
     "judge": "claude-opus-4-8",
     "evidence_gatherer": "claude-opus-4-8",
+    "verifier": "claude-opus-4-8",
     "synthesizer": "claude-opus-4-8",
 }
 
@@ -635,14 +637,17 @@ class FactoryTests(unittest.TestCase):
         self.assertIsNot(thinkers["proposer"], thinkers["judge"])
         self.assertIsNot(thinkers["proposer"], thinkers["synthesizer"])
 
-    def test_evidence_gatherer_and_critic_get_web_search_others_do_not(self):
-        # Two roles can search the web: the evidence gatherer (Claude) verifies
-        # SUPPORTING sources, and the critic (Codex) retrieves OPPOSING ones so
-        # its attack is source-backed. Every other role stays deny-all.
+    def test_web_search_roles_are_evidence_critic_verifier_others_are_not(self):
+        # Three roles can reach the web: the evidence gatherer (Claude) verifies
+        # SUPPORTING sources, the critic (Codex) retrieves OPPOSING ones so its
+        # attack is source-backed, and the verifier (Claude) re-fetches the cited
+        # URLs to confirm each figure is bound to the source it claims. Every
+        # other role stays deny-all.
         cfg = _FakeConfig(_LOCKED_BACKENDS, _LOCKED_MODELS)
         thinkers = build_role_thinkers(cfg)
         self.assertTrue(thinkers["evidence_gatherer"].web_search)
         self.assertTrue(thinkers["critic"].web_search)
+        self.assertTrue(thinkers["verifier"].web_search)
         self.assertFalse(thinkers["proposer"].web_search)
         self.assertFalse(thinkers["judge"].web_search)
         self.assertFalse(thinkers["synthesizer"].web_search)
@@ -664,6 +669,15 @@ class FactoryTests(unittest.TestCase):
         cfg.critic_web_search = False
         thinkers = build_role_thinkers(cfg)
         self.assertFalse(thinkers["critic"].web_search)
+
+    def test_verifier_web_search_can_be_disabled_via_config(self):
+        # The off-switch: config.verifier_web_search = False reverts the citation
+        # verifier to deny-all (the prompt's 'if a URL will not load, mark it
+        # unverifiable' fallback then keeps it honest).
+        cfg = _FakeConfig(_LOCKED_BACKENDS, _LOCKED_MODELS)
+        cfg.verifier_web_search = False
+        thinkers = build_role_thinkers(cfg)
+        self.assertFalse(thinkers["verifier"].web_search)
 
     def test_evidence_web_search_is_a_real_lever_on_a_genuine_config(self):
         # The off-switch must work on a REAL HarnessConfig (not just the test
