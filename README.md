@@ -19,7 +19,7 @@ If you can't answer those from your notes, you have a capture tool, not a resear
 
 ## Where It's Going
 
-Three ways to operate the graph work today. A human drives it from the CLI. An AI agent in Claude Code or Claude Desktop drives it interactively over the MCP server, with the host's own model supplying all the thinking (no server-side model, no API key — see "Intelligent operation" below). And a fully hands-off loop drives it via `sparkle run`, where Claude proposes and judges while a *different AI from another company* attacks, debating a seed question with no human in the turn order (see "Autonomous Operation" below). That hands-off loop talks to the AI models through the `claude` and `codex` command-line tools you already have logged in — no API keys, no extra Python packages to install.
+Three ways to operate the graph work today, and the main one is an AI agent. In Claude Code or Claude Desktop, an agent drives the graph interactively over the MCP server, with the host's own model supplying all the thinking — no server-side model, no API key (see "Intelligent Operation" below). A human can also drive it directly from the CLI. And a fully hands-off loop drives it via `sparkle run`, where Claude proposes and judges while a *different AI from another company* attacks, debating a seed question with no human in the turn order (see "Autonomous Operation" below). That loop reaches the models through the `claude` and `codex` command-line tools you already have logged in, so it too needs no API key.
 
 What's left:
 
@@ -33,32 +33,41 @@ See [`docs/roadmap.md`](docs/roadmap.md) for the full plan.
 
 ## Quick Start
 
+Requires Python 3.11+ and nothing else — the core is pure standard library. The main way to use Sparkle is to let an AI agent drive the graph over MCP; the CLI is there when you want to seed, inspect, or steer it by hand.
+
+### Let an AI agent drive it (the primary path)
+
 ```bash
-git clone <repo> && cd sparkle
+git clone https://github.com/albeorla/sparkle.git && cd sparkle
+pip install -e '.[mcp]'                  # core + the MCP server
 
-# Optional: install the `sparkle` console command, then drop the PYTHONPATH prefix
-pip install -e .   # afterwards you can run `sparkle init`, `sparkle home`, etc.
-
-# Initialize a graph store
-PYTHONPATH=src python3 -m sparkle init
-
-# Seed with an example graph
-PYTHONPATH=src python3 -m sparkle bootstrap
-
-# See the dashboard
-PYTHONPATH=src python3 -m sparkle home
-
-# Explore
-PYTHONPATH=src python3 -m sparkle tree <node_id_prefix>
-PYTHONPATH=src python3 -m sparkle show <node_id_prefix>
-PYTHONPATH=src python3 -m sparkle why <node_id_prefix>
+sparkle init                             # create a graph store
+claude mcp add sparkle -- sparkle mcp    # register the server with Claude Code
 ```
 
-Or explore the pre-built demo graph:
+Now ask your agent to work the graph. "What's the weakest part of the debate right now?" pulls the live work frontier; the `/challenge`, `/investigate`, `/synthesize`, and `/next` slash commands run the adversarial moves. The host's own model does all the reasoning — no server-side model, no API key. Full details in [Intelligent Operation](#intelligent-operation-mcp).
+
+### Drive it yourself from the CLI
 
 ```bash
-PYTHONPATH=src python3 -m sparkle --store demo/.sparkle/graph.json home
-PYTHONPATH=src python3 -m sparkle --store demo/.sparkle/graph.json tree e036ff896cea
+pip install -e .             # core only — drop the [mcp] extra
+
+sparkle bootstrap           # seed an example graph
+sparkle home                # dashboard with counts and next actions
+
+# Explore any node by a short id prefix
+sparkle tree <node_id_prefix>
+sparkle show <node_id_prefix>
+sparkle why  <node_id_prefix>
+```
+
+Prefer not to install? Every command also runs from the source tree — swap `sparkle <cmd>` for `PYTHONPATH=src python3 -m sparkle <cmd>`.
+
+Explore the pre-built demo graph without touching your own:
+
+```bash
+sparkle --store demo/.sparkle/graph.json home
+sparkle --store demo/.sparkle/graph.json tree e036ff896cea
 ```
 
 ## Intelligent Operation (MCP)
@@ -87,7 +96,7 @@ The MCP path still needs a human to take turns with the model. The autonomous ha
 The reason this exists is an integrity weakness the interactive path can't fully close. The "was this claim challenged?" gate only checks that an objection *exists*; it can't tell whether the objection came from a real opponent or from the same model writing a strawman against itself. The harness makes the adversary real by pitting *two different AI companies' models* against each other, which it reaches through command-line tools rather than a paid API:
 
 - **Claude proposes and judges; a GPT model attacks.** Each debate role is a separate AI call with its own context and a distinct author identity. Claude (Opus 4.8, reached through the `claude` command-line tool on your Claude Max login) plays the proposer, the judge, the evidence gatherer, and the synthesizer. The critic — the role whose whole job is to attack the claim — is OpenAI's GPT-5.5, reached through the `codex` command-line tool on your Codex/ChatGPT login. Real adversarial diversity comes from *different model families* (Claude vs GPT), not from running two tiers of the same Claude model, so every Claude-side role uses the same Opus 4.8 and the genuine opponent is the GPT critic. Each role's model family and model id are env-overridable (e.g. `SPARKLE_CRITIC_BACKEND`, `SPARKLE_CRITIC_MODEL`), and the codex side's reasoning effort can be tuned with `SPARKLE_CODEX_REASONING_EFFORT`.
-- **No API keys, no pip extras.** The loop never imports a model SDK and never reads an API key. It shells out to the `claude` and `codex` binaries you already have installed and logged in — `claude -p` rides your Claude Max subscription and `codex exec` rides your Codex/ChatGPT subscription, so the spend comes out of those subscriptions, not a per-token API bill. Each AI call runs in a throwaway, empty working directory with no tools granted, so the model can answer but can't read or touch this repository while it thinks.
+- **It runs on your subscriptions, not an API bill.** The loop never imports a model SDK or reads an API key — it shells out to the `claude` and `codex` binaries you already have logged in. `claude -p` rides your Claude Max subscription and `codex exec` rides your Codex/ChatGPT subscription, so the spend comes out of those, not a per-token API bill. Each call runs in a throwaway empty directory with no tools granted, so the model can answer but can't read or touch this repo while it thinks.
 - **A cross-family integrity gate.** Before the judge is allowed to ratify a claim, the engine requires that at least one objection against it came from a *different model family* than the claim's author (Claude vs GPT) — not merely a different author name. This is stronger than the shared "different author" floor in the operations layer (which the harness also turns on): a role with a distinct name but the same model family (say, a Claude-side evidence gatherer writing a counter-point against a Claude-authored claim) does *not* satisfy the gate, so a model can't ratify its own claim off an attack it effectively wrote. The one locked configuration rule — checked when the run is set up — is that the critic must be a different family than the proposer.
 - **Rewrite, re-challenge.** When a claim is revised, its old objections are copied onto the new version for lineage and display, but those copied-over objections are *tagged as carried-over* and no longer count toward the gate. A rewritten claim therefore has to earn a fresh, genuinely cross-family objection before the judge can ratify it — you can't rewrite around an attack and then ratify the new wording on the strength of the old one. (A self-loop `contradicts` edge — a claim pointing its own objection at itself — is also banned outright at the edge-write boundary, since it can never be a real attack.)
 
@@ -95,7 +104,7 @@ The reason this exists is an integrity weakness the interactive path can't fully
 # No API key and no pip extra — just the two CLIs, installed and logged in:
 #   claude  -> https://docs.claude.com/claude-code   (rides your Claude Max login)
 #   codex   -> the Codex/ChatGPT CLI                  (rides your Codex/ChatGPT login)
-PYTHONPATH=src python3 -m sparkle run "Does music help you code?"
+sparkle run "Does music help you code?"
 ```
 
 `sparkle run` is a lazy seam, exactly like `sparkle mcp`: the autonomous code is only imported when you invoke `run`. Because the engine and the thinker layer are now pure standard-library Python, that import always succeeds — there is no extra to miss. The real failure mode is a missing command-line tool: if `claude` or `codex` isn't on your PATH, `run` stops with a clear "install and log in to the claude and codex CLIs" message (not a pip hint). Every graph mutation the loop makes goes through the same `ops.py` functions the CLI and MCP server use, stamped with a `run_id` so the whole run — the claim, the objection, the decision, the ratified version, the synthesis, and all of their edges — is visible to the run-summary / diff / rollback surface. After a run finishes, the printed summary shows the run id, the final verdict signal, and every move the agents made; the MCP server's run tools (summary, diff, ratify-region, rollback) can then review or undo the whole run by its id.
@@ -128,7 +137,7 @@ Recurring research moves have templates so you don't have to remember node types
 | `application` | claim | derived_from | Drawing a practical conclusion |
 
 ```bash
-PYTHONPATH=src python3 -m sparkle add-branch \
+sparkle add-branch \
   --from <claim_id> --template support \
   --title "Primary source evidence" \
   --citations "https://example.com/paper"
@@ -160,7 +169,7 @@ All state lives in a single human-readable JSON file (`.sparkle/graph.json`). No
 | `lineage` | Walk all inbound ancestors (BFS) |
 | `export` | Export a subgraph rooted at a node to markdown |
 | `mcp` | Run the MCP server over stdin/stdout (requires the `sparkle[mcp]` extra) |
-| `run` | Run the autonomous adversarial loop on a seed question — Claude (Opus 4.8) proposes and judges, OpenAI's GPT-5.5 attacks, debating unattended (requires the `claude` and `codex` CLIs on PATH and logged in — no API key, no pip extra); `--rounds` overrides the critique/gather caps, `--max-moves` sets the runaway backstop |
+| `run` | Run the autonomous adversarial loop on a seed question — Claude (Opus 4.8) proposes and judges, OpenAI's GPT-5.5 attacks, debating unattended (requires the `claude` and `codex` CLIs on PATH and logged in); `--rounds` overrides the critique/gather caps, `--max-moves` sets the runaway backstop |
 
 All commands accept `--store <path>` to use a non-default graph file.
 
